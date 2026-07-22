@@ -129,6 +129,7 @@ const S = {
   cart:[], deliveryIdx:0, importAgree:false, order:null,
   taxiDest:'', taxiState:'idle', taxiInfo:null,
   map:null, AdvancedMarker:null, markers:new Map(), portMarker:null, route:null, mapReady:false,
+  mapSpots:[],
 };
 S.route = 'home';
 
@@ -372,7 +373,7 @@ function spotCard(s){
 }
 function bindExplore(){
   document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=async()=>{
-    S.category=b.dataset.cat; await loadSpots(true); render();
+    S.category=b.dataset.cat; await loadSpots(true); render();   // render→initMap이 지도도 갱신
   });
   document.querySelectorAll('.spotcard').forEach(c=>c.onclick=e=>{
     if(e.target.closest('[data-add]')) return; openSpot(c.dataset.spot);
@@ -385,6 +386,29 @@ function bindExplore(){
 function togglePkg(id){
   if(S.pkg.has(id)){ S.pkg.delete(id); toast(t('removed')); }
   else { S.pkg.add(id); toast(t('added')); track('spot_add_package', id); }
+
+  // 탐방 화면에서는 전체 렌더를 피한다.
+  // render()를 부르면 지도가 새로 만들어져 사용자가 보던 위치·확대가 초기화되기 때문.
+  if(S.route === 'explore' && S.mapReady){
+    const inPkg = S.pkg.has(id);
+    const btn = document.querySelector(`[data-add="${CSS.escape(id)}"]`);
+    if(btn){ btn.classList.toggle('on', inPkg); btn.innerHTML = inPkg ? I.check : I.plus; }
+    // 하단 패키지 CTA 갱신
+    let bar = document.querySelector('.bottomcta');
+    if(S.pkg.size && !bar){
+      bar = document.createElement('div');
+      bar.className = 'bottomcta';
+      bar.innerHTML = `<button class="btn purple" id="pkgBtn"></button>`;
+      document.querySelector('#screen > div').appendChild(bar);
+      bar.querySelector('#pkgBtn').onclick = startAi;
+    }
+    if(bar){
+      if(S.pkg.size) bar.querySelector('#pkgBtn').textContent = S.pkg.size + t('build_pkg');
+      else bar.remove();
+    }
+    drawMarkers(false);          // 마커 색만 갱신, 지도 위치는 유지
+    return;
+  }
   render();
 }
 
@@ -414,31 +438,116 @@ async function initMap(){
       zoomControl:true,
     });
     S.mapReady = true;
-    drawMarkers();
+    // 지도를 움직이거나 확대/축소하면 클러스터를 다시 계산
+    S.map.addListener('idle', () => { if(S.route==='explore') drawMarkers(false); });
+    await loadMapSpots();
+    drawMarkers(true);
   }catch(e){
     box.innerHTML = `<div class="maploading">지도를 불러오지 못했어요. 키 제한(HTTP 리퍼러) 설정을 확인해 주세요.</div>`;
   }
 }
-function drawMarkers(){
-  if(!S.mapReady || !S.map) return;
-  S.markers.forEach(m=>m.map=null); S.markers.clear();
-  const bounds = new google.maps.LatLngBounds();
-  bounds.extend({lat:S.cruise.port.lat,lng:S.cruise.port.lng});
-  for(const s of S.spots.slice(0,60)){
-    if(s.lat==null) continue;
-    const el=document.createElement('div');
-    el.className='pin'+(S.activeSpot===s.id?' active':'')+(S.pkg.has(s.id)?' inpkg':'');
-    el.innerHTML=`<span class="bub">${esc(s.name.length>12?s.name.slice(0,11)+'…':s.name)}</span><span class="tail"></span>`;
-    el.onclick=ev=>{ ev.stopPropagation(); openSpot(s.id); };
-    S.markers.set(s.id, new S.AdvancedMarker({map:S.map,position:{lat:s.lat,lng:s.lng},content:el,
-      zIndex:S.activeSpot===s.id?99:1}));
-    bounds.extend({lat:s.lat,lng:s.lng});
+
+// 지도용 스팟은 목록(20개)과 별도로 넓게 받아옵니다.
+// 목록은 가까운 순 20개면 충분하지만, 지도는 항구 반경 전체가 보여야 하기 때문입니다.
+async function loadMapSpots(){
+  // 체류 시간 안에 갈 수 있는 곳 '전부'를 받아옵니다.
+  // 제주시 근처만 나오면 안 되므로 거리순 상위 N개가 아니라 전 지역을 대상으로 함.
+  // compact=1 로 필드를 줄여 1,600곳도 200KB 수준.
+  const mk = page => {
+    const p = new URLSearchParams({cruiseId:S.cruise.id, lang:S.lang, size:500, page, compact:'1'});
+    if(S.category!=='all') p.set('category', S.category);
+    return '/spots?'+p;
+  };
+  try{
+    const first = await api(mk(1));
+    let items = first.items;
+    const pages = Math.min(4, Math.ceil(first.totalCount / 500));   // 최대 2,000곳
+    if(pages > 1){
+      const rest = await Promise.all(
+        Array.from({length: pages-1}, (_,i) => api(mk(i+2)).catch(()=>({items:[]})))
+      );
+      items = items.concat(...rest.map(r=>r.items));
+    }
+    S.mapSpots = items.filter(s=>s.lat!=null);
+  }catch{
+    S.mapSpots = S.spots.filter(s=>s.lat!=null);
   }
+}
+
+// 줌 레벨에 맞춰 격자 클러스터링 (외부 라이브러리 없이)
+function clusterSpots(spots, zoom){
+  // 화면상 약 68px에 해당하는 격자 크기를 위경도로 환산
+  const cellPx = 96;
+  const worldPx = 256 * Math.pow(2, zoom);
+  const degPerPxLng = 360 / worldPx;
+  const cellLng = degPerPxLng * cellPx;
+  const cellLat = cellLng * 0.8;            // 위도는 메르카토르 보정 대신 근사
+  const groups = new Map();
+  for(const s of spots){
+    const key = Math.floor(s.lat/cellLat) + ':' + Math.floor(s.lng/cellLng);
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  return [...groups.values()];
+}
+
+function drawMarkers(refit){
+  if(!S.mapReady || !S.map) return;
+  const zoom = S.map.getZoom() ?? 11;
+  const source = (S.mapSpots && S.mapSpots.length) ? S.mapSpots : S.spots.filter(s=>s.lat!=null);
+
+  S.markers.forEach(m=>m.map=null); S.markers.clear();
+
+  // 화면 밖은 그리지 않음 (핀 수 절감)
+  const vb = S.map.getBounds();
+  const visible = vb ? source.filter(s=>vb.contains({lat:s.lat,lng:s.lng})) : source;
+  // 화면에 아무것도 없으면(첫 로드 등) 전체로 폴백
+  const target = visible.length ? visible : source;
+
+  for(const group of clusterSpots(target, zoom)){
+    if(group.length === 1){
+      const s = group[0];
+      const el=document.createElement('div');
+      el.className='pin'+(S.activeSpot===s.id?' active':'')+(S.pkg.has(s.id)?' inpkg':'');
+      el.innerHTML=`<span class="bub">${esc(s.name.length>12?s.name.slice(0,11)+'…':s.name)}</span><span class="tail"></span>`;
+      el.onclick=ev=>{ ev.stopPropagation(); openSpot(s.id); };
+      S.markers.set(s.id, new S.AdvancedMarker({map:S.map,position:{lat:s.lat,lng:s.lng},content:el,
+        zIndex:S.activeSpot===s.id?99:1}));
+    } else {
+      // 클러스터 — 중심에 개수 표시, 클릭하면 그 무리로 확대
+      const lat = group.reduce((a,s)=>a+s.lat,0)/group.length;
+      const lng = group.reduce((a,s)=>a+s.lng,0)/group.length;
+      const el=document.createElement('div');
+      const size = group.length<10?'s':group.length<50?'m':'l';
+      el.className='cluster '+size+(group.some(s=>S.pkg.has(s.id))?' has-pkg':'');
+      el.textContent = group.length;
+      el.onclick=ev=>{
+        ev.stopPropagation();
+        const b=new google.maps.LatLngBounds();
+        group.forEach(s=>b.extend({lat:s.lat,lng:s.lng}));
+        S.map.fitBounds(b,{top:50,right:50,bottom:50,left:50});
+        // 이미 충분히 확대됐는데도 겹치면 한 단계 더
+        if(S.map.getZoom() >= 17) S.map.setZoom(17);
+      };
+      S.markers.set('c:'+lat.toFixed(4)+':'+lng.toFixed(4),
+        new S.AdvancedMarker({map:S.map,position:{lat,lng},content:el,zIndex:2}));
+    }
+  }
+
+  // 항구 마커
   if(S.portMarker) S.portMarker.map=null;
   const p=document.createElement('div'); p.className='portpin';
   p.innerHTML=`${I.ship}${esc(S.cruise.port.name)}`;
   S.portMarker=new S.AdvancedMarker({map:S.map,position:{lat:S.cruise.port.lat,lng:S.cruise.port.lng},content:p,zIndex:100});
-  if(S.spots.length) S.map.fitBounds(bounds,{top:40,right:40,bottom:40,left:40});
+
+  // 최초 진입/크루즈 변경 시에만 화면 맞춤 (사용자가 움직인 뒤엔 유지)
+  if(refit && source.length){
+    const b=new google.maps.LatLngBounds();
+    b.extend({lat:S.cruise.port.lat,lng:S.cruise.port.lng});
+    // 가까운 순 상위 일부만으로 화면을 맞춘다. 나머지는 축소하면 보임.
+    source.slice(0,120).forEach(s=>b.extend({lat:s.lat,lng:s.lng}));
+    S.map.fitBounds(b,{top:40,right:40,bottom:40,left:40});
+  }
 }
 
 /* ---------------- 5. 스팟 상세 ---------------- */

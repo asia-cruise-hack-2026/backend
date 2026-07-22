@@ -85,7 +85,7 @@ const notFound = (msg = '리소스를 찾을 수 없습니다.') => { throw new 
 const langOf = q => (LANGS.includes(q.get('lang')) ? q.get('lang') : 'ko');
 const paging = q => {
   const page = Math.max(1, num(q.get('page'), 1));
-  const size = Math.min(200, Math.max(1, num(q.get('size'), 20)));
+  const size = Math.min(500, Math.max(1, num(q.get("size"), 20)));
   return { page, size, offset: (page - 1) * size };
 };
 
@@ -196,6 +196,19 @@ on('GET', '/api/v1/spots', (ctx) => {
   const sort = { distance: `${distCol} ASC`, name: 'name ASC' }[q.get('sort')] || `${distCol} ASC`;
   const { page, size, offset } = paging(q);
   const rows = db.prepare(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`).all(...args, size, offset);
+
+  // compact=1 — 지도 마커용 축약 응답 (전 지역을 한 번에 받기 위해 페이로드를 줄임)
+  if (q.get('compact') === '1') {
+    return {
+      items: rows.map(r => ({
+        id: r.id, name: r.name, lat: r.lat, lng: r.lng,
+        category: r.category, bookable: r.bookable ? 1 : 0,
+        km: portKey === 'gangjeong' ? r.dist_gangjeong_km : r.dist_jeju_km,
+      })),
+      page, size, totalCount: total,
+      window: { port: portKey, availableMinutes: availableMin },
+    };
+  }
 
   return {
     items: rows.map(r => spotRow(r, portKey, availableMin)),

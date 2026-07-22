@@ -161,14 +161,29 @@ select.sel{
 .bdg.nofit{background:var(--restr-bg);color:var(--restr)}
 
 /* 지도 마커 */
-.pin{transform:translate(-50%,-100%);cursor:pointer;display:flex;flex-direction:column;align-items:center}
+/* AdvancedMarkerElement가 콘텐츠 하단 중앙을 좌표에 맞춰주므로
+   여기서 transform으로 다시 옮기면 핀이 실제 위치보다 위로 뜬다(해안가는 바다로 넘어감). */
+.pin{cursor:pointer;display:flex;flex-direction:column;align-items:center}
 .pin .bub{background:var(--primary);color:#fff;font-weight:650;font-size:11px;white-space:nowrap;
   border-radius:999px;padding:4px 10px;box-shadow:0 3px 10px rgba(0,0,0,.22);transition:.12s}
 .pin .tail{width:2px;height:9px;background:var(--primary)}
 .pin.inpkg .bub,.pin.inpkg .tail{background:var(--purple)}
 .pin.active .bub,.pin.active .tail{background:var(--label-normal)}
 .pin.active .bub{transform:scale(1.06)}
-.portpin{transform:translate(-50%,-50%);background:var(--label-normal);color:#fff;border-radius:999px;
+/* 클러스터 — 겹치는 핀을 개수로 묶어 표시 */
+.cluster{
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  background:var(--primary);color:#fff;border-radius:999px;font-weight:800;
+  box-shadow:0 3px 12px rgba(0,102,255,.45), 0 0 0 4px rgba(0,102,255,.18);
+  transition:.12s;
+}
+.cluster:hover{transform:scale(1.08)}
+.cluster.has-pkg{background:var(--purple);box-shadow:0 3px 12px rgba(139,63,240,.45), 0 0 0 4px rgba(139,63,240,.18)}
+.cluster.s{width:34px;height:34px;font-size:12.5px}
+.cluster.m{width:42px;height:42px;font-size:13.5px}
+.cluster.l{width:52px;height:52px;font-size:14.5px}
+
+.portpin{background:var(--label-normal);color:#fff;border-radius:999px;
   padding:4px 10px;font-size:10.5px;font-weight:750;display:flex;align-items:center;gap:4px;white-space:nowrap;
   box-shadow:0 0 0 4px rgba(23,23,25,.15)}
 .portpin svg{width:11px;height:11px}
