@@ -1,6 +1,6 @@
 // TAMRA PASS — API 서버 (의존성 0, Node 내장 모듈만)
 // 실행: node server/server.js   →  http://localhost:8787/api/v1
-import { DatabaseSync } from 'node:sqlite';
+import { q as dbAll, q1 as dbOne, exec as dbExec, ping } from './db.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,17 +12,7 @@ const ROOT = path.join(__dirname, '..');
 const PORT = process.env.PORT || 8787;
 
 // ---------- DB ----------
-// 로컬: npm run seed 로 만든 파일 DB를 사용
-// 서버리스(Vercel): 파일 시스템이 읽기 전용이라 인메모리 DB를 콜드스타트에 채움
-const DB_FILE = path.join(ROOT, 'tamrapass.db');
-const useFileDb = !process.env.VERCEL && fs.existsSync(DB_FILE);
-const db = new DatabaseSync(useFileDb ? DB_FILE : ':memory:');
-if (!useFileDb) {
-  const t0 = Date.now();
-  const { seedInto } = await import('./seed-core.js');
-  const n = seedInto(db);
-  console.log(`[db] in-memory seed: spots ${n.spots} · goods ${n.goods} (${Date.now() - t0}ms)`);
-}
+// Cloud SQL (PostgreSQL) — 접속은 src/db.js 가 담당합니다.
 
 // ---------- .env 로더 (의존성 없이) ----------
 const ENV = (() => {
@@ -121,8 +111,16 @@ const goodsRow = (g, lang) => ({
   customsNote: g.customs_note, cruiseLineNote: g.cruise_line_note,
   detailUrl: g.detail_url,
 });
+// 항구는 2곳뿐이라 시작 시 한 번만 읽어 캐시합니다 (조회마다 DB를 때리지 않도록)
+let PORTS = {};
+export async function loadPorts() {
+  const rows = await dbAll('SELECT * FROM ports');
+  PORTS = Object.fromEntries(rows.map(p => [p.key, p]));
+  return PORTS;
+}
+
 const cruiseRow = (c, lang) => {
-  const port = db.prepare('SELECT * FROM ports WHERE key=?').get(c.port_key);
+  const port = PORTS[c.port_key];
   return {
     id: c.id, ship: c.ship,
     port: { key: port.key, name: port['name_' + lang], lat: port.lat, lng: port.lng },
@@ -151,16 +149,16 @@ const on = (method, pattern, handler) => {
 };
 
 // --- 온보딩 ---
-on('GET', '/api/v1/ports', (ctx) => {
+on('GET', '/api/v1/ports', async (ctx) => {
   const lang = langOf(ctx.q);
-  return { items: db.prepare('SELECT * FROM ports').all().map(p => ({ key: p.key, name: p['name_' + lang], lat: p.lat, lng: p.lng })) };
+  return { items: (await dbAll('SELECT * FROM ports')).map(p => ({ key: p.key, name: p['name_' + lang], lat: p.lat, lng: p.lng })) };
 });
 // 실제 선석배정 기반 — 연간 300여 건이므로 날짜/항구/선박으로 좁혀서 조회합니다.
 //   ?date=2026-07-14       그 날 입항하는 배
 //   ?from=2026-07-14       그 날짜 이후 (기본: 가장 이른 날짜부터)
 //   ?port=jeju|gangjeong   항구
 //   ?ship=MSC              선명 부분일치
-on('GET', '/api/v1/cruises', (ctx) => {
+on('GET', '/api/v1/cruises', async (ctx) => {
   const q = ctx.q, lang = langOf(q);
   const where = [], args = [];
   if (q.get('date')) { where.push('date = ?'); args.push(q.get('date')); }
@@ -168,38 +166,36 @@ on('GET', '/api/v1/cruises', (ctx) => {
   if (q.get('port')) { where.push('port_key = ?'); args.push(q.get('port')); }
   if (q.get('ship')) { where.push('ship LIKE ?'); args.push('%' + q.get('ship') + '%'); }
   const sql = 'FROM cruises' + (where.length ? ' WHERE ' + where.join(' AND ') : '');
-  const total = db.prepare(`SELECT COUNT(*) c ${sql}`).get(...args).c;
+  const total = (await dbOne(`SELECT COUNT(*)::int c ${sql}`, ...args)).c;
   const { page, size, offset } = paging(q);
-  const rows = db.prepare(`SELECT * ${sql} ORDER BY date, arrival LIMIT ? OFFSET ?`).all(...args, size, offset);
+  const rows = (await dbAll(`SELECT * ${sql} ORDER BY date, arrival LIMIT ? OFFSET ?`, ...args, size, offset));
   return { items: rows.map(c => cruiseRow(c, lang)), page, size, totalCount: total };
 });
 
 // 기항이 있는 날짜 목록 — 날짜 선택 UI용
-on('GET', '/api/v1/cruises/dates', (ctx) => {
+on('GET', '/api/v1/cruises/dates', async (ctx) => {
   const q = ctx.q;
   const where = [], args = [];
   if (q.get('from')) { where.push('date >= ?'); args.push(q.get('from')); }
   if (q.get('port')) { where.push('port_key = ?'); args.push(q.get('port')); }
   const sql = 'FROM cruises' + (where.length ? ' WHERE ' + where.join(' AND ') : '');
-  const rows = db.prepare(
-    `SELECT date, COUNT(*) count,
-            SUM(CASE WHEN port_key='jeju' THEN 1 ELSE 0 END) jeju,
-            SUM(CASE WHEN port_key='gangjeong' THEN 1 ELSE 0 END) gangjeong
-     ${sql} GROUP BY date ORDER BY date LIMIT ?`
-  ).all(...args, Math.min(400, num(q.get('limit'), 60)));
+  const rows = (await dbAll(`SELECT date, COUNT(*)::int count,
+            SUM(CASE WHEN port_key='jeju' THEN 1 ELSE 0 END)::int jeju,
+            SUM(CASE WHEN port_key='gangjeong' THEN 1 ELSE 0 END)::int gangjeong
+     ${sql} GROUP BY date ORDER BY date LIMIT ?`, ...args, Math.min(400, num(q.get('limit'), 60))));
   return { items: rows };
 });
-on('GET', '/api/v1/cruises/:id', (ctx) => {
-  const c = db.prepare('SELECT * FROM cruises WHERE id=?').get(ctx.params.id) || notFound('크루즈를 찾을 수 없습니다.');
+on('GET', '/api/v1/cruises/:id', async (ctx) => {
+  const c = (await dbOne('SELECT * FROM cruises WHERE id=?', ctx.params.id)) || notFound('크루즈를 찾을 수 없습니다.');
   return cruiseRow(c, langOf(ctx.q));
 });
 
 // --- 스팟(지도) ---
-function resolveWindow(q) {
+async function resolveWindow(q) {
   let portKey = q.get('port'), availableMin = null;
   const cruiseId = q.get('cruiseId');
   if (cruiseId) {
-    const c = db.prepare('SELECT * FROM cruises WHERE id=?').get(cruiseId) || notFound('크루즈를 찾을 수 없습니다.');
+    const c = (await dbOne('SELECT * FROM cruises WHERE id=?', cruiseId)) || notFound('크루즈를 찾을 수 없습니다.');
     portKey = c.port_key;
     availableMin = Math.max(0, c.dep_m - c.arr_m - BUFFER_MIN);
   }
@@ -208,9 +204,9 @@ function resolveWindow(q) {
   return { portKey: portKey || 'jeju', availableMin };
 }
 
-on('GET', '/api/v1/spots', (ctx) => {
+on('GET', '/api/v1/spots', async (ctx) => {
   const q = ctx.q, lang = langOf(q);
-  const { portKey, availableMin } = resolveWindow(q);
+  const { portKey, availableMin } = await resolveWindow(q);
   const distCol = portKey === 'gangjeong' ? 'dist_gangjeong_km' : 'dist_jeju_km';
 
   const where = ['lang = ?', 'lat IS NOT NULL'], args = [lang];
@@ -225,15 +221,15 @@ on('GET', '/api/v1/spots', (ctx) => {
   }
   // 체류시간 필터: 왕복이동 + 체류 <= 가용시간   (driveMinutes = max(6, km*2.4))
   if (availableMin != null) {
-    where.push(`(MAX(6, ROUND(${distCol} * 2.4)) * 2 + stay_minutes) <= ?`);
+    where.push(`(GREATEST(6, ROUND(${distCol} * 2.4)) * 2 + stay_minutes) <= ?`);
     args.push(availableMin);
   }
   const sql = `FROM spots WHERE ${where.join(' AND ')}`;
-  const total = db.prepare(`SELECT COUNT(*) c ${sql}`).get(...args).c;
+  const total = (await dbOne(`SELECT COUNT(*)::int c ${sql}`, ...args)).c;
 
   const sort = { distance: `${distCol} ASC`, name: 'name ASC' }[q.get('sort')] || `${distCol} ASC`;
   const { page, size, offset } = paging(q);
-  const rows = db.prepare(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`).all(...args, size, offset);
+  const rows = (await dbAll(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`, ...args, size, offset));
 
   // compact=1 — 지도 마커용 축약 응답 (전 지역을 한 번에 받기 위해 페이로드를 줄임)
   if (q.get('compact') === '1') {
@@ -255,20 +251,19 @@ on('GET', '/api/v1/spots', (ctx) => {
   };
 });
 
-on('GET', '/api/v1/spots/categories', (ctx) => {
+on('GET', '/api/v1/spots/categories', async (ctx) => {
   const lang = langOf(ctx.q);
-  const rows = db.prepare(
-    `SELECT category key, category_label label, COUNT(*) count FROM spots
-     WHERE lang=? AND lat IS NOT NULL GROUP BY category ORDER BY count DESC`).all(lang);
+  const rows = (await dbAll(`SELECT category key, category_label label, COUNT(*)::int count FROM spots
+     WHERE lang=? AND lat IS NOT NULL GROUP BY category ORDER BY count DESC`, lang));
   return { items: rows };
 });
 
-on('GET', '/api/v1/spots/:id', (ctx) => {
+on('GET', '/api/v1/spots/:id', async (ctx) => {
   const lang = langOf(ctx.q);
-  const r = db.prepare('SELECT * FROM spots WHERE id=? AND lang=?').get(ctx.params.id, lang)
-        || db.prepare("SELECT * FROM spots WHERE id=? AND lang='ko'").get(ctx.params.id)
+  const r = (await dbOne('SELECT * FROM spots WHERE id=? AND lang=?', ctx.params.id, lang))
+        || (await dbOne("SELECT * FROM spots WHERE id=? AND lang='ko'", ctx.params.id))
         || notFound('스팟을 찾을 수 없습니다.');
-  const { portKey, availableMin } = resolveWindow(ctx.q);
+  const { portKey, availableMin } = await resolveWindow(ctx.q);
   return {
     ...spotRow(r, portKey, availableMin),
     description: r.description || '',
@@ -278,18 +273,16 @@ on('GET', '/api/v1/spots/:id', (ctx) => {
   };
 });
 
-on('GET', '/api/v1/spots/:id/nearby', (ctx) => {
+on('GET', '/api/v1/spots/:id/nearby', async (ctx) => {
   const lang = langOf(ctx.q);
-  const base = db.prepare('SELECT * FROM spots WHERE id=? AND lang=?').get(ctx.params.id, lang)
-            || db.prepare("SELECT * FROM spots WHERE id=? AND lang='ko'").get(ctx.params.id)
+  const base = (await dbOne('SELECT * FROM spots WHERE id=? AND lang=?', ctx.params.id, lang))
+            || (await dbOne("SELECT * FROM spots WHERE id=? AND lang='ko'", ctx.params.id))
             || notFound('스팟을 찾을 수 없습니다.');
   if (base.lat == null) return { items: [] };
   const radius = num(ctx.q.get('radius'), 3);
   const limit = Math.min(20, num(ctx.q.get('limit'), 4));
   const dLat = radius / 111, dLng = radius / (111 * Math.cos(base.lat * Math.PI / 180));
-  const cand = db.prepare(
-    `SELECT * FROM spots WHERE lang=? AND id<>? AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?`
-  ).all(lang, base.id, base.lat - dLat, base.lat + dLat, base.lng - dLng, base.lng + dLng);
+  const cand = (await dbAll(`SELECT * FROM spots WHERE lang=? AND id<>? AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?`, lang, base.id, base.lat - dLat, base.lat + dLat, base.lng - dLng, base.lng + dLng));
 
   const items = cand.map(r => ({ r, km: hav(base.lat, base.lng, r.lat, r.lng) }))
     .filter(x => x.km <= radius).sort((a, b) => a.km - b.km).slice(0, limit)
@@ -305,18 +298,19 @@ on('GET', '/api/v1/spots/:id/nearby', (ctx) => {
 });
 
 // --- AI 패키지 ---
-on('POST', '/api/v1/packages', (ctx) => {
+on('POST', '/api/v1/packages', async (ctx) => {
   const { cruiseId, spotIds, lang: l } = ctx.body || {};
   const lang = LANGS.includes(l) ? l : 'ko';
   if (!Array.isArray(spotIds) || !spotIds.length) bad('INVALID_PARAM', 'spotIds가 필요합니다.');
-  const c = db.prepare('SELECT * FROM cruises WHERE id=?').get(cruiseId) || notFound('크루즈를 찾을 수 없습니다.');
-  const port = db.prepare('SELECT * FROM ports WHERE key=?').get(c.port_key);
+  const c = (await dbOne('SELECT * FROM cruises WHERE id=?', cruiseId)) || notFound('크루즈를 찾을 수 없습니다.');
+  const port = (await dbOne('SELECT * FROM ports WHERE key=?', c.port_key));
   const availableMin = Math.max(0, c.dep_m - c.arr_m - BUFFER_MIN);
 
-  const spots = spotIds.map(id =>
-    db.prepare('SELECT * FROM spots WHERE id=? AND lang=?').get(id, lang) ||
-    db.prepare("SELECT * FROM spots WHERE id=? AND lang='ko'").get(id)
-  ).filter(Boolean);
+  // 선택한 스팟을 한 번의 쿼리로 가져옵니다 (요청 언어 우선, 없으면 한국어 폴백)
+  const rows = await dbAll("SELECT * FROM spots WHERE id = ANY(?) AND lang IN (?, 'ko')", spotIds, lang);
+  const byId = new Map();
+  for (const r of rows) if (!byId.has(r.id) || r.lang === lang) byId.set(r.id, r);
+  const spots = spotIds.map(id => byId.get(id)).filter(Boolean);
   if (!spots.length) notFound('선택한 스팟을 찾을 수 없습니다.');
 
   // 동선 최적화: 항구 출발 → 순회 → 항구 복귀 (≤7개는 완전탐색, 그 이상은 최근접이웃)
@@ -376,39 +370,38 @@ on('POST', '/api/v1/packages', (ctx) => {
         (driveMin(hav(P.lat, P.lng, a.lat, a.lng)) + a.stay_minutes)).slice(0, 1).map(s => s.id),
     };
   }
-  db.prepare(`INSERT INTO packages VALUES (?,?,?,?,?,?,?)`)
-    .run(pkg.id, ctx.sessionId, c.id, JSON.stringify(spotIds), JSON.stringify(pkg), total, nowISO());
-  logEvent(ctx.sessionId, 'package_created', pkg.id, lang, { total, fits: pkg.fitsWindow });
+  (await dbExec(`INSERT INTO packages VALUES (?,?,?,?,?,?,?)`, pkg.id, ctx.sessionId, c.id, JSON.stringify(spotIds), JSON.stringify(pkg), total, nowISO()));
+  logEvent(ctx.sessionId, 'package_created', pkg.id, lang, { total, fits: pkg.fitsWindow }).catch(() => {});
   return pkg;
 });
 
-on('GET', '/api/v1/packages/:id', (ctx) => {
-  const r = db.prepare('SELECT * FROM packages WHERE id=?').get(ctx.params.id) || notFound('패키지를 찾을 수 없습니다.');
+on('GET', '/api/v1/packages/:id', async (ctx) => {
+  const r = (await dbOne('SELECT * FROM packages WHERE id=?', ctx.params.id)) || notFound('패키지를 찾을 수 없습니다.');
   return JSON.parse(r.itinerary_json);
 });
 
 // --- 파트너 / 예약 ---
-on('GET', '/api/v1/partners', (ctx) => {
+on('GET', '/api/v1/partners', async (ctx) => {
   const lang = langOf(ctx.q);
   return {
-    items: db.prepare('SELECT * FROM partners').all().map(p => ({
+    items: (await dbAll('SELECT * FROM partners')).map(p => ({
       id: p.id, name: p['name_' + lang], role: p['role_' + lang], vehicle: p['car_' + lang],
       rating: p.rating, languages: p.languages.split(','), verified: !!p.verified,
       price: p.price, priceLabel: money(p.price, lang) + (lang === 'ko' ? ' ~' : ''),
     })),
   };
 });
-on('POST', '/api/v1/bookings', (ctx) => {
+on('POST', '/api/v1/bookings', async (ctx) => {
   const { packageId, partnerId } = ctx.body || {};
-  const p = db.prepare('SELECT * FROM partners WHERE id=?').get(partnerId) || notFound('파트너를 찾을 수 없습니다.');
+  const p = (await dbOne('SELECT * FROM partners WHERE id=?', partnerId)) || notFound('파트너를 찾을 수 없습니다.');
   const id = uid('bk');
-  db.prepare(`INSERT INTO bookings VALUES (?,?,?,?,?,?)`).run(id, ctx.sessionId, packageId || null, partnerId, 'requested', nowISO());
-  logEvent(ctx.sessionId, 'booking_created', id, 'ko', { partnerId });
+  (await dbExec(`INSERT INTO bookings VALUES (?,?,?,?,?,?)`, id, ctx.sessionId, packageId || null, partnerId, 'requested', nowISO()));
+  logEvent(ctx.sessionId, 'booking_created', id, 'ko', { partnerId }).catch(() => {});
   return { id, status: 'requested', partnerId: p.id };
 });
 
 // --- 쇼핑 ---
-on('GET', '/api/v1/goods', (ctx) => {
+on('GET', '/api/v1/goods', async (ctx) => {
   const q = ctx.q, lang = langOf(q);
   const where = [], args = [];
   const cat = q.get('category');
@@ -416,39 +409,42 @@ on('GET', '/api/v1/goods', (ctx) => {
   if (q.get('importStatus')) { where.push('import_status = ?'); args.push(q.get('importStatus')); }
   if (q.get('q')) { where.push('name LIKE ?'); args.push('%' + q.get('q') + '%'); }
   const sql = 'FROM goods' + (where.length ? ' WHERE ' + where.join(' AND ') : '');
-  const total = db.prepare(`SELECT COUNT(*) c ${sql}`).get(...args).c;
+  const total = (await dbOne(`SELECT COUNT(*)::int c ${sql}`, ...args)).c;
   const sort = { priceAsc: 'price ASC', priceDesc: 'price DESC', name: 'name ASC' }[q.get('sort')] || 'id ASC';
   const { page, size, offset } = paging(q);
-  const rows = db.prepare(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`).all(...args, size, offset);
+  const rows = (await dbAll(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`, ...args, size, offset));
   return { items: rows.map(g => goodsRow(g, lang)), page, size, totalCount: total };
 });
 
-on('GET', '/api/v1/goods/categories', (ctx) => {
+on('GET', '/api/v1/goods/categories', async (ctx) => {
   const lang = langOf(ctx.q);
   const L = { all: { ko: '전체', en: 'All', ja: 'すべて', zh: '全部' },
               food: { ko: '먹거리', en: 'Food', ja: '食品', zh: '食品' },
               cosmetics: { ko: '화장품', en: 'Cosmetics', ja: '化粧品', zh: '化妆品' },
               souvenir: { ko: '기념품', en: 'Souvenirs', ja: 'お土産', zh: '纪念品' } };
-  const counts = db.prepare('SELECT category key, COUNT(*) count FROM goods GROUP BY category').all();
+  const counts = (await dbAll('SELECT category key, COUNT(*)::int count FROM goods GROUP BY category'));
   const total = counts.reduce((a, c) => a + c.count, 0);
   return { items: [{ key: 'all', label: L.all[lang], count: total },
     ...counts.map(c => ({ key: c.key, label: (L[c.key] || {})[lang] || c.key, count: c.count }))] };
 });
 
-on('GET', '/api/v1/goods/:id', (ctx) => {
-  const g = db.prepare('SELECT * FROM goods WHERE id=?').get(ctx.params.id) || notFound('상품을 찾을 수 없습니다.');
-  logEvent(ctx.sessionId, 'goods_view', g.id, langOf(ctx.q), null);
+on('GET', '/api/v1/goods/:id', async (ctx) => {
+  const g = (await dbOne('SELECT * FROM goods WHERE id=?', ctx.params.id)) || notFound('상품을 찾을 수 없습니다.');
+  logEvent(ctx.sessionId, 'goods_view', g.id, langOf(ctx.q), null).catch(() => {});
   return goodsRow(g, langOf(ctx.q));
 });
 
-on('POST', '/api/v1/orders', (ctx) => {
+on('POST', '/api/v1/orders', async (ctx) => {
   const { items, deliveryMethod = 'ship', importAgreed = false, lang: l } = ctx.body || {};
   const lang = LANGS.includes(l) ? l : 'ko';
   if (!Array.isArray(items) || !items.length) bad('INVALID_PARAM', '주문할 상품이 없습니다.');
   if (!DELIVERY_NOTE[deliveryMethod]) bad('INVALID_PARAM', 'deliveryMethod는 ship | port_pickup | current_location 입니다.');
 
+  // 주문 상품을 한 번의 쿼리로 조회
+  const goodsRows = await dbAll('SELECT * FROM goods WHERE id = ANY(?)', items.map(i => i.goodsId));
+  const goodsById = new Map(goodsRows.map(g => [g.id, g]));
   const detailed = items.map(i => {
-    const g = db.prepare('SELECT * FROM goods WHERE id=?').get(i.goodsId) || notFound(`상품 ${i.goodsId}을(를) 찾을 수 없습니다.`);
+    const g = goodsById.get(i.goodsId) || notFound(`상품 ${i.goodsId}을(를) 찾을 수 없습니다.`);
     return { ...goodsRow(g, lang), qty: Math.max(1, num(i.qty, 1)) };
   });
   const restricted = detailed.filter(d => d.importStatus === 'restricted' || d.importStatus === 'prohibited');
@@ -461,10 +457,9 @@ on('POST', '/api/v1/orders', (ctx) => {
   }
   const total = detailed.reduce((a, d) => a + d.price * d.qty, 0);
   const id = uid('ord');
-  db.prepare(`INSERT INTO orders VALUES (?,?,?,?,?,?,?,?)`)
-    .run(id, ctx.sessionId, JSON.stringify(detailed.map(d => ({ goodsId: d.id, qty: d.qty, price: d.price }))),
-      total, deliveryMethod, importAgreed ? 1 : 0, 'paid', nowISO());
-  logEvent(ctx.sessionId, 'order_placed', id, lang, { total, deliveryMethod });
+  (await dbExec(`INSERT INTO orders VALUES (?,?,?,?,?,?,?,?)`, id, ctx.sessionId, JSON.stringify(detailed.map(d => ({ goodsId: d.id, qty: d.qty, price: d.price }))),
+      total, deliveryMethod, importAgreed ? 1 : 0, 'paid', nowISO()));
+  logEvent(ctx.sessionId, 'order_placed', id, lang, { total, deliveryMethod }).catch(() => {});
 
   return {
     id, status: 'paid', totalPrice: total, totalPriceLabel: money(total, lang),
@@ -475,12 +470,12 @@ on('POST', '/api/v1/orders', (ctx) => {
 });
 
 // --- 이동(택시) ---
-on('GET', '/api/v1/taxi/estimate', (ctx) => {
+on('GET', '/api/v1/taxi/estimate', async (ctx) => {
   const lang = langOf(ctx.q);
   const portKey = ctx.q.get('port') || 'jeju';
-  const port = db.prepare('SELECT * FROM ports WHERE key=?').get(portKey) || notFound('항구를 찾을 수 없습니다.');
-  const s = db.prepare('SELECT * FROM spots WHERE id=? AND lang=?').get(ctx.q.get('spotId'), lang)
-         || db.prepare("SELECT * FROM spots WHERE id=? AND lang='ko'").get(ctx.q.get('spotId'))
+  const port = (await dbOne('SELECT * FROM ports WHERE key=?', portKey)) || notFound('항구를 찾을 수 없습니다.');
+  const s = (await dbOne('SELECT * FROM spots WHERE id=? AND lang=?', ctx.q.get('spotId'), lang))
+         || (await dbOne("SELECT * FROM spots WHERE id=? AND lang='ko'", ctx.q.get('spotId')))
          || notFound('목적지 스팟을 찾을 수 없습니다.');
   if (s.lat == null) bad('INVALID_PARAM', '해당 스팟은 좌표가 없어 요금을 계산할 수 없습니다.');
   const km = hav(port.lat, port.lng, s.lat, s.lng);
@@ -491,50 +486,48 @@ on('GET', '/api/v1/taxi/estimate', (ctx) => {
     fare, fareLabel: money(fare, lang),
   };
 });
-on('POST', '/api/v1/taxi/requests', (ctx) => {
+on('POST', '/api/v1/taxi/requests', async (ctx) => {
   const lang = LANGS.includes(ctx.body?.lang) ? ctx.body.lang : 'ko';
   const D = { name: { ko: '박준영', en: 'Junyoung Park', ja: 'パク·ジュンヨン', zh: '朴俊英' },
               car:  { ko: '쏘나타 (개인택시)', en: 'Sonata (private taxi)', ja: 'ソナタ(個人タクシー)', zh: '索纳塔（个人出租）' } };
   const id = uid('tx');
-  logEvent(ctx.sessionId, 'taxi_called', id, lang, { spotId: ctx.body?.spotId });
+  logEvent(ctx.sessionId, 'taxi_called', id, lang, { spotId: ctx.body?.spotId }).catch(() => {});
   return { id, status: 'assigned', etaMinutes: 6,
     driver: { name: D.name[lang], vehicle: D.car[lang], plate: '제주 80바 3517', rating: 4.9 } };
 });
 
 // --- 행동 로그 / 통계 ---
-function logEvent(sessionId, type, refId, lang, meta) {
-  db.prepare(`INSERT INTO events (session_id,type,ref_id,lang,meta_json,created_at) VALUES (?,?,?,?,?,?)`)
-    .run(sessionId || null, type, refId || null, lang || null, meta ? JSON.stringify(meta) : null, nowISO());
+async function logEvent(sessionId, type, refId, lang, meta) {
+  (await dbExec(`INSERT INTO events (session_id,type,ref_id,lang,meta_json,created_at) VALUES (?,?,?,?,?,?)`, sessionId || null, type, refId || null, lang || null, meta ? JSON.stringify(meta) : null, nowISO()));
 }
-on('POST', '/api/v1/events', (ctx) => {
+on('POST', '/api/v1/events', async (ctx) => {
   const { type, refId, spotId, goodsId, lang, meta } = ctx.body || {};
   if (!type) bad('INVALID_PARAM', 'type이 필요합니다.');
-  logEvent(ctx.sessionId, type, refId || spotId || goodsId || null, lang, meta);
+  logEvent(ctx.sessionId, type, refId || spotId || goodsId || null, lang, meta).catch(() => {});
   return { ok: true };
 });
-on('GET', '/api/v1/stats/summary', () => {
-  const top = (type, table, idcol = 'id') => db.prepare(
-    `SELECT e.ref_id id, COUNT(*) views, (SELECT name FROM ${table} WHERE ${idcol}=e.ref_id ${table === 'spots' ? "AND lang='ko'" : ''}) name
-     FROM events e WHERE e.type=? AND e.ref_id IS NOT NULL GROUP BY e.ref_id ORDER BY views DESC LIMIT 5`).all(type);
-  const dist = col => db.prepare(`SELECT ${col} k, COUNT(*) c FROM events WHERE ${col} IS NOT NULL GROUP BY ${col}`).all()
+on('GET', '/api/v1/stats/summary', async () => {
+  const top = async (type, table, idcol = 'id') => (await dbAll(`SELECT e.ref_id id, COUNT(*)::int views, (SELECT name FROM ${table} WHERE ${idcol}=e.ref_id ${table === 'spots' ? "AND lang='ko'" : ''}) name
+     FROM events e WHERE e.type=? AND e.ref_id IS NOT NULL GROUP BY e.ref_id ORDER BY views DESC LIMIT 5`, type));
+  const dist = async col => (await dbAll(`SELECT ${col} k, COUNT(*)::int c FROM events WHERE ${col} IS NOT NULL GROUP BY ${col}`))
     .reduce((a, r) => (a[r.k] = r.c, a), {});
-  const pk = db.prepare('SELECT AVG(total_minutes) a, COUNT(*) c FROM packages').get();
-  const od = db.prepare('SELECT COUNT(*) c, COALESCE(SUM(total_price),0) s FROM orders').get();
+  const pk = (await dbOne('SELECT AVG(total_minutes)::float a, COUNT(*)::int c FROM packages'));
+  const od = (await dbOne('SELECT COUNT(*)::int c, COALESCE(SUM(total_price),0)::int s FROM orders'));
   return {
-    totalEvents: db.prepare('SELECT COUNT(*) c FROM events').get().c,
-    topSpots: top('spot_view', 'spots'),
-    topGoods: top('goods_view', 'goods'),
+    totalEvents: (await dbOne('SELECT COUNT(*)::int c FROM events')).c,
+    topSpots: await top('spot_view', 'spots'),
+    topGoods: await top('goods_view', 'goods'),
     packages: { count: pk.c, avgMinutes: pk.a ? Math.round(pk.a) : null },
     orders: { count: od.c, revenue: od.s },
-    langDistribution: dist('lang'),
+    langDistribution: await dist('lang'),
   };
 });
 
 // --- 헬스체크 ---
-on('GET', '/api/v1/health', () => ({
+on('GET', '/api/v1/health', async () => ({
   ok: true,
-  spots: db.prepare("SELECT COUNT(*) c FROM spots WHERE lang='ko'").get().c,
-  goods: db.prepare('SELECT COUNT(*) c FROM goods').get().c,
+  spots: (await dbOne("SELECT COUNT(*)::int c FROM spots WHERE lang='ko'")).c,
+  goods: (await dbOne('SELECT COUNT(*)::int c FROM goods')).c,
 }));
 
 // ---------- 요청 핸들러 ----------
@@ -581,7 +574,7 @@ export async function handler(req, res) {
     const m = url.pathname.match(route.rx);
     const params = Object.fromEntries(route.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
     const ctx = { q: url.searchParams, params, body, sessionId: req.headers['x-session-id'] || null };
-    send(200, route.handler(ctx));
+    send(200, await route.handler(ctx));
   } catch (e) {
     if (e instanceof ApiError) return send(e.status, { error: { code: e.code, message: e.message, ...(e.extra || {}) } });
     console.error(e);
@@ -593,7 +586,18 @@ export default handler;
 
 // ---------- 로컬 실행 ----------
 // 서버리스(Vercel)에서는 상시 서버를 띄우지 않으므로 listen 하지 않습니다.
-if (!process.env.VERCEL) {
+// DB 연결 확인 후 항구 정보를 캐시합니다. 실패하면 즉시 드러나도록 그대로 종료.
+try {
+  await ping();
+  await loadPorts();
+  console.log('[db] Cloud SQL 연결 OK');
+} catch (e) {
+  console.error('[db] 연결 실패 —', e.message);
+  console.error('     DB_HOST / DB_NAME / DB_USER / DB_PASSWORD 또는 INSTANCE_CONNECTION_NAME 을 확인하세요.');
+  process.exit(1);
+}
+
+{
   http.createServer(handler).listen(PORT, () => {
     console.log(`TAMRA PASS  →  http://localhost:${PORT}`);
     console.log(`  API   : http://localhost:${PORT}/api/v1/health`);

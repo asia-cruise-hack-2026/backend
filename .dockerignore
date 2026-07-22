@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+*.db
+*.db-journal
+.env
+.env.*
+!.env.example
+.vercel
+dist
+scripts/.work
+data/source
+docs

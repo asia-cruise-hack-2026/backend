@@ -9,36 +9,33 @@ Asia Cruise Liners Hackathon 2026 · [frontend 저장소](https://github.com/asi
 
 ## 배포
 
-**운영 URL — https://tamrapass.vercel.app**
+**운영 URL — https://tamrapass-34273089941.asia-northeast3.run.app**
 
-Vercel 서버리스로 배포돼 있습니다. 로컬과 배포 환경의 차이는 DB뿐입니다:
-
-| | 로컬 | Vercel |
-|---|---|---|
-| DB | 파일 (`tamrapass.db`) | 인메모리 (콜드스타트 시 JSON에서 적재, ~60ms) |
-| 정적 파일 | 서버가 직접 서빙 | 동일 (단일 함수가 API+정적 모두 처리) |
-| 맵 키 | `.env` | Vercel 환경변수 |
-
-서버리스라 **인스턴스가 재시작되면 주문·이벤트 기록이 초기화**됩니다.
-읽기(관광지·상품)는 영향 없고, 누적 통계(`/stats/summary`)만 인스턴스 기준으로 집계됩니다.
-영구 보존이 필요해지면 외부 DB(Vercel Postgres 등)로 바꾸면 됩니다.
-
-재배포:
-```bash
-vercel deploy --prod
 ```
+[Cloud Run]  tamrapass         서울(asia-northeast3) · 컨테이너
+     ↓ 유닉스 소켓 (인터넷 경유 없음)
+[Cloud SQL]  omong             PostgreSQL 18 · DB: tamrapass
+```
+
+| | |
+|---|---|
+| 프로젝트 | `gaia-492707` |
+| 인스턴스 연결 이름 | `gaia-492707:asia-northeast3:omong` |
+| 재배포 | `gcloud run deploy tamrapass --source=. --region=asia-northeast3` |
+
+Cloud Run은 `INSTANCE_CONNECTION_NAME` 이 있으면 유닉스 소켓으로,
+없으면 `DB_HOST`/`DB_PORT` 로 접속합니다 (로컬 개발). → `src/db.js`
 
 ## 빠른 시작
 
 ```bash
-cp .env.example .env      # 구글맵 키 입력 (지도 없이도 API는 동작)
-npm run seed              # data/*.json → SQLite 생성 (약 10초)
+cp .env.example .env      # DB 접속 정보와 구글맵 키 입력
+npm install               # pg 드라이버
+npm run seed              # data/*.json → Cloud SQL  (약 2초)
 npm start                 # http://localhost:8787
 ```
 
-**의존성 설치가 필요 없습니다.** `npm install` 하지 않아도 됩니다 —
-HTTP 서버와 SQLite 모두 Node 내장 모듈(`node:http`, `node:sqlite`)만 사용합니다.
-단, `node:sqlite` 때문에 **Node 22.5 이상**이 필요합니다 (`node --version`으로 확인).
+**Node 24 이상**이 필요합니다 (`node --version`).
 
 동작 확인:
 ```bash
@@ -50,24 +47,32 @@ curl http://localhost:8787/api/v1/health
 
 ---
 
+> ⚠️ **`npm run seed` 는 테이블을 DROP 후 재생성합니다.**
+> 관광지·상품 데이터뿐 아니라 **주문·이벤트 기록도 전부 삭제**되므로,
+> 운영/데모 중에는 실행하지 마세요.
+
 ## 폴더 구조
 
 ```
 backend/
 ├── src/
 │   ├── server.js        API 서버 (라우팅·비즈니스 로직 전체)
-│   └── seed.js          data/*.json → SQLite 적재
+│   ├── db.js            Cloud SQL 접속 (소켓/TCP 자동 전환)
+│   ├── schema.sql       PostgreSQL 스키마
+│   └── seed.js          data/*.json → DB 적재
+├── Dockerfile           Cloud Run 배포용
 ├── data/                ★ 모든 데이터가 여기 모여 있습니다
 │   ├── spots.json       관광지 1,668곳 × 4개 국어 (6,683행)
 │   ├── goods.json       특산품·기념품 1,895개 (반입규정 포함)
+│   ├── cruises.json     실제 기항 스케줄 321건
 │   ├── csv/             같은 데이터의 CSV 버전 (엑셀용)
+│   ├── source/          선석배정 원본 xlsx
 │   └── README.md        출처·스키마·수집 방법
 ├── scripts/             데이터 수집 파이프라인 (재현용)
 ├── docs/
 │   ├── API-SPEC.md      전체 API 명세
 │   └── reports/         데이터 정리 리포트
-├── public/              데모 UI (서버가 정적 서빙)
-└── tamrapass.db         seed로 생성 — git에 올리지 않음
+└── public/              데모 UI (서버가 정적 서빙)
 ```
 
 ---
@@ -126,5 +131,7 @@ fitsWindow       = roundTripMinutes ≤ availableMinutes
 데모에 불필요해서 범위에서 뺐습니다. 필요해지면 추가하면 됩니다.
 
 - 회원가입·로그인 (세션은 `X-Session-Id` 헤더로만 구분)
+- **API 인증** — 현재 CORS `*` · 인증 없음. URL만 알면 누구나 호출 가능합니다.
+  데모 범위에서는 의도적 선택이며, 데이터 수정 API를 추가한다면 인증이 반드시 필요합니다.
 - 실제 PG 결제 (주문은 `status: "paid"`로 즉시 완료)
 - 관리자 화면
