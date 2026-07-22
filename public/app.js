@@ -16,6 +16,14 @@ const STR = {
   cruise_q:{ko:"어떤 크루즈로 오셨나요?",en:"Which cruise did you arrive on?",zh:"您乘坐哪艘邮轮抵达？",ja:"どのクルーズで到着しましたか？"},
   cruise_q_sub:{ko:"크루즈를 선택하면 체류 시간에 딱 맞는 일정을 추천해 드려요.",en:"Pick your ship and we'll tailor everything to your time ashore.",zh:"选择邮轮后，我们将为您的岸上时间量身推荐。",ja:"船を選ぶと滞在時間に合わせてご提案します。"},
   select_cruise:{ko:"크루즈 선택",en:"Select your cruise",zh:"选择邮轮",ja:"クルーズを選択"},
+  arrival_date:{ko:"입항 날짜",en:"Arrival date",zh:"抵达日期",ja:"入港日"},
+  ships_that_day:{ko:"이 날 입항하는 크루즈",en:"Ships arriving that day",zh:"当日抵达的邮轮",ja:"この日入港するクルーズ"},
+  no_sailing:{ko:"이 날은 기항 예정이 없어요.",en:"No port calls scheduled that day.",zh:"当日无邮轮停靠。",ja:"この日は寄港予定がありません。"},
+  go_next_call:{ko:"다음 기항일 보기",en:"Next port call",zh:"查看下一个停靠日",ja:"次の寄港日へ"},
+  pax_capacity:{ko:"승객 정원",en:"Passengers",zh:"载客量",ja:"乗客定員"},
+  berth_label:{ko:"선석",en:"Berth",zh:"泊位",ja:"バース"},
+  overnight_stay:{ko:"오버나이트 정박",en:"Overnight stay",zh:"过夜停泊",ja:"オーバーナイト停泊"},
+  schedule_source:{ko:"제주특별자치도 해양산업과 선석배정 자료 기준",en:"Based on Jeju Province official berth allocation data",zh:"依据济州道官方泊位分配资料",ja:"済州道の公式バース割当資料に基づく"},
   docking_port:{ko:"정박 항구",en:"Docking port",zh:"停靠港口",ja:"停泊港"},
   time_in_jeju:{ko:"제주 체류 시간",en:"Time in Jeju",zh:"济州停留时间",ja:"済州滞在時間"},
   next_dest:{ko:"다음 목적지",en:"Next destination",zh:"下一目的地",ja:"次の目的地"},
@@ -240,44 +248,110 @@ function bindLang(){
   $('#langNext').onclick = async () => { await loadCruises(); S.view='cruise'; render(); };
 }
 
-/* ---------------- 2. 크루즈 선택 ---------------- */
+/* ---------------- 2. 크루즈 선택 (실제 선석배정 기반) ---------------- */
+// 연간 300여 건이라 '날짜 → 그 날 입항하는 배' 순으로 좁혀서 고릅니다.
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
 async function loadCruises(){
-  S.cruises = (await api('/cruises?lang='+S.lang)).items;
-  if(!S.cruise) S.cruise = S.cruises[0];
-  else S.cruise = S.cruises.find(c=>c.id===S.cruise.id) || S.cruises[0];
+  if(!S.cruiseDate) S.cruiseDate = todayISO();
+  let r = await api(`/cruises?lang=${S.lang}&date=${S.cruiseDate}&size=20`);
+  // 그 날 기항이 없으면 다음 기항일로 자동 이동 (최초 진입 시에만)
+  if(!r.items.length && !S.dateTouched){
+    const nx = await api(`/cruises?lang=${S.lang}&from=${S.cruiseDate}&size=1`);
+    if(nx.items.length){
+      S.cruiseDate = nx.items[0].date;
+      r = await api(`/cruises?lang=${S.lang}&date=${S.cruiseDate}&size=20`);
+    }
+  }
+  S.cruises = r.items;
+  S.cruise = S.cruises.find(c=>c.id===S.cruise?.id) || S.cruises[0] || null;
 }
 function viewCruise(){
   const c = S.cruise;
-  return `<div class="scroll pad" style="padding-top:30px">
+  return `<div class="scroll pad" style="padding-top:26px">
     <div class="h1">${t('cruise_q')}</div>
-    <p class="sub" style="margin:10px 0 22px">${t('cruise_q_sub')}</p>
-    <label class="sub" style="font-size:12.5px;font-weight:650;display:block;margin-bottom:7px">${t('select_cruise')}</label>
-    <select class="sel" id="cruiseSel">
-      ${S.cruises.map(x=>`<option value="${x.id}" ${x.id===c.id?'selected':''}>${esc(x.ship)} · ${esc(x.line)}</option>`).join('')}
-    </select>
-    <div class="infocard">
-      <div class="inforow"><span class="k">${t('docking_port')}</span><span class="v">${esc(c.port.name)}</span></div>
-      <div class="inforow"><span class="k">${t('time_in_jeju')}</span><span class="v">${hLabel(Math.round(c.stayMinutes/60))} · ${c.arrival}–${c.departure}</span></div>
+    <p class="sub" style="margin:10px 0 20px">${t('cruise_q_sub')}</p>
+
+    <label class="sub" style="font-size:12.5px;font-weight:650;display:block;margin-bottom:7px">${t('arrival_date')}</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn ghost sm" id="dPrev" style="width:44px;flex:none">‹</button>
+      <input class="sel" type="date" id="dateInput" value="${S.cruiseDate}" style="flex:1;text-align:center">
+      <button class="btn ghost sm" id="dNext" style="width:44px;flex:none">›</button>
+    </div>
+
+    <div style="margin-top:20px">
+      <div class="h3" style="margin-bottom:10px">${t('ships_that_day')}
+        ${S.cruises.length?`<span class="sub" style="font-size:12.5px;font-weight:500"> · ${S.cruises.length}</span>`:''}</div>
+      ${S.cruises.length ? `<div style="display:flex;flex-direction:column;gap:9px">
+        ${S.cruises.map(x=>`<button class="langopt" data-cruise="${esc(x.id)}" aria-pressed="${c&&x.id===c.id}" style="align-items:flex-start">
+          <span style="flex:1;min-width:0;text-align:left">
+            <span class="lb" style="display:block">${esc(x.ship)}</span>
+            <span class="ls" style="display:block;margin-top:3px">
+              ${esc(x.port.name)} · ${x.arrival}–${x.departure} · ${hLabel(x.stayHours)}
+              ${x.overnight?` · ${t('overnight_stay')}`:''}
+            </span>
+            <span class="ls" style="display:block">${t('next_dest')}: ${esc(x.nextDestination)}</span>
+          </span>
+          <span class="code" style="align-self:center">${x.passengers?x.passengers.toLocaleString():''}</span>
+        </button>`).join('')}
+      </div>` : `<div class="empty" style="padding:26px 10px">
+        ${t('no_sailing')}<br>
+        <button class="btn ghost sm" id="nextCall" style="width:auto;padding:0 16px;margin-top:12px;display:inline-flex">${t('go_next_call')}</button>
+      </div>`}
+    </div>
+
+    ${c?`<div class="infocard">
+      <div class="inforow"><span class="k">${t('docking_port')}</span><span class="v">${esc(c.port.name)}${c.berth?` (${esc(c.berth)})`:''}</span></div>
+      <div class="inforow"><span class="k">${t('time_in_jeju')}</span><span class="v">${hLabel(c.stayHours)} · ${c.arrival}–${c.departure}</span></div>
       <div class="inforow"><span class="k">${t('board_by')}</span><span class="v">${c.boardByTime}</span></div>
       <div class="inforow"><span class="k">${t('next_dest')}</span><span class="v">${esc(c.nextDestination)}</span></div>
-    </div>
-    <div style="height:20px"></div>
+      ${c.passengers?`<div class="inforow"><span class="k">${t('pax_capacity')}</span><span class="v">${c.passengers.toLocaleString()}</span></div>`:''}
+    </div>`:''}
+    <p class="sub" style="font-size:11px;margin-top:12px">${t('schedule_source')}</p>
+    <div style="height:16px"></div>
   </div>
   <div style="padding:12px 20px 18px;flex:none">
-    <button class="btn" id="startBtn">${t('get_started')}</button>
+    <button class="btn" id="startBtn" ${c?'':'disabled'}>${t('get_started')}</button>
     <div class="trust">${I.shield}${t('official_badge')} · ${t('powered_tamnao')}</div>
   </div>`;
 }
 function bindCruise(){
-  $('#cruiseSel').onchange = e => { S.cruise = S.cruises.find(x=>x.id===e.target.value); render(); };
-  $('#startBtn').onclick = async () => { S.view='app'; go('home'); await loadSpots(true); render(); };
+  const shift = async days => {
+    const d = new Date(S.cruiseDate + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    S.cruiseDate = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    S.dateTouched = true; S.cruise = null;
+    await loadCruises(); render();
+  };
+  $('#dPrev').onclick = () => shift(-1);
+  $('#dNext').onclick = () => shift(1);
+  $('#dateInput').onchange = async e => {
+    S.cruiseDate = e.target.value; S.dateTouched = true; S.cruise = null;
+    await loadCruises(); render();
+  };
+  const nc = $('#nextCall');
+  if(nc) nc.onclick = async () => {
+    const nx = await api(`/cruises?lang=${S.lang}&from=${S.cruiseDate}&size=1`);
+    if(nx.items.length){ S.cruiseDate = nx.items[0].date; S.dateTouched = false; await loadCruises(); render(); }
+    else toast(t('no_sailing'));
+  };
+  document.querySelectorAll('[data-cruise]').forEach(b => b.onclick = () => {
+    S.cruise = S.cruises.find(x => x.id === b.dataset.cruise); render();
+  });
+  $('#startBtn').onclick = async () => {
+    if(!S.cruise) return;
+    S.view='app'; go('home'); await loadSpots(true); render();
+  };
 }
 
 /* ---------------- 3. 홈 ---------------- */
 function timeLeft(){
-  const c=S.cruise, [ah,am]=c.arrival.split(':').map(Number), [dh,dm]=c.departure.split(':').map(Number);
-  const nowM = ah*60+am+90;                      // 설계와 동일: 도착 90분 경과 가정
-  return Math.max(0, dh*60+dm - nowM);
+  // 설계와 동일하게 '도착 90분 경과' 시점을 현재로 가정.
+  // 오버나이트 정박은 출항이 자정을 넘기므로 stayMinutes로 계산해야 음수가 안 난다.
+  const c = S.cruise;
+  return Math.max(0, c.stayMinutes - 90);
 }
 function viewHome(){
   const c = S.cruise;
@@ -913,7 +987,7 @@ function viewMy(){
     <div class="infocard" style="margin-top:0">
       <div class="sub" style="font-size:12px">${t('my_cruise')}</div>
       <div class="h3" style="margin-top:4px">${esc(c.ship)}</div>
-      <div class="sub" style="font-size:12.5px;margin-top:3px">${esc(c.line)} · ${esc(c.port.name)}</div>
+      <div class="sub" style="font-size:12.5px;margin-top:3px">${esc(c.date)} · ${esc(c.port.name)}${c.berth?` (${esc(c.berth)})`:''}</div>
       <div class="sub" style="font-size:12.5px;margin-top:8px">${c.arrival}–${c.departure} · ${t('board_by')} ${c.boardByTime}</div>
     </div>
     <div style="margin-top:8px">

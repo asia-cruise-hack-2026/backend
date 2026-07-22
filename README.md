@@ -78,7 +78,8 @@ backend/
 
 | 엔드포인트 | 설명 |
 |---|---|
-| `GET /api/v1/cruises` | 크루즈 5척 (항구·정박시간·탑승마감) |
+| `GET /api/v1/cruises?date=` | **실제 기항 스케줄** — 그 날 입항하는 배 |
+| `GET /api/v1/cruises/dates` | 기항 예정일 목록 (날짜 선택 UI용) |
 | `GET /api/v1/spots?cruiseId=msc` | **체류시간 안에 다녀올 수 있는 스팟만** 반환 |
 | `GET /api/v1/spots/:id/nearby` | 좌표 기반 주변 추천 |
 | `POST /api/v1/packages` | 동선 최적화 + 시간표 생성 |
@@ -105,6 +106,7 @@ fitsWindow       = roundTripMinutes ≤ availableMinutes
 
 | 데이터 | 규모 | 출처 |
 |---|--:|---|
+| **크루즈 기항** | **321건 / 30척** | **제주도 해양산업과 선석배정 자료** |
 | 관광지·맛집 | 1,668곳 × 4개 국어 | 비짓제주 공개 API 1,398 + 탐나오 270 |
 | 특산품·기념품 | 1,895개 | 탐나오 |
 | 좌표 보유 | 1,620곳 | 지도 매핑 가능 |

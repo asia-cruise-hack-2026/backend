@@ -7,6 +7,7 @@
 |---|--:|--:|---|
 | `spots.json` | 6,683 | 6.5MB | 관광지 1,668곳 × 4개 국어 |
 | `goods.json` | 1,895 | 1.0MB | 특산품·기념품 (반입규정 포함) |
+| `cruises.json` | 321 | 0.2MB | **실제 크루즈 기항 스케줄** (2026년 전체) |
 | `csv/spots.csv` | 6,683 | 4.4MB | 위와 동일, 엑셀용 (UTF-8 BOM) |
 | `csv/goods.csv` | 1,895 | 0.7MB | 위와 동일 |
 
@@ -95,6 +96,48 @@
 
 ---
 
+## cruises.json
+
+제주특별자치도 해양산업과가 배포하는 **선석배정 자료**를 그대로 옮긴 것입니다. 목업이 아닙니다.
+
+```json
+{
+  "id": "jeju-2026-07-24-adora-mediterranea",
+  "ship": "Adora Mediterranea",
+  "portKey": "jeju",              // jeju | gangjeong
+  "berth": "제주항",               // 제주항 | 강정1 | 강정2
+  "date": "2026-07-24",
+  "arrival": "08:00", "departure": "16:00",
+  "arrM": 480, "depM": 960,        // 자정을 넘기면 depM > 1440
+  "stayHours": 8, "overnight": false,
+  "grossTonnage": 85619, "passengers": 2680,
+  "originPort": {...}, "prevPort": {...},
+  "nextPort": { "ko": "부산, 대한민국", "en": "Busan, Korea", "ja": "…", "zh": "…" }
+}
+```
+
+| | |
+|---|---|
+| 기간 | 2026-01-04 ~ 2026-12-30 |
+| 기항 건수 | **321건** (제주항 122 · 강정항 199) |
+| 선박 | 30척 |
+| 체류시간 | 5.5 ~ 43.5시간 (대부분 8시간 전후) |
+| 오버나이트 | 자정을 넘겨 정박하는 일정 존재 (`overnight: true`) |
+
+> **설계 목업과 실제가 달랐던 점** — 초기 프로토타입은 MSC Bellissima·Adora Magic City·Diamond Princess를
+> 제주항으로 표시했지만, 실제 선석배정에서 이 세 척은 **모두 강정항**에 접안합니다.
+> 항구가 다르면 추천 관광지가 통째로 달라지므로 반드시 실제 데이터를 써야 합니다.
+
+**갱신 방법** — 원본은 수시로 변경됩니다.
+[제주도 크루즈선석배정 변경알림](https://www.jeju.go.kr/group/part11/change.htm)에서 최신 xlsx를 받아:
+
+```bash
+node scripts/07-build-cruises.js "경로/2026년도 선석배정(알림)-XXXXXX.xlsx"
+npm run seed
+```
+
+현재 반영본: `data/source/2026년도 선석배정(알림)-260718.xlsx` (2026-07-18 배포)
+
 ## 데이터 출처
 
 | 출처 | 라이선스/이용 | 수집 방식 |
@@ -102,6 +145,7 @@
 | [비짓제주](https://visitjeju.net) | 공개 API (apiKey 발급) | `vsjApi/contents/list`, `locale=kr/en/jp/cn` |
 | [탐나오](https://www.tamnao.com) | 제주도·제주관광협회 공공 플랫폼 | 목록 AJAX + 상세페이지 파싱 |
 | [OSM Nominatim](https://nominatim.openstreetmap.org) | ODbL | 좌표 → 주소 역지오코딩 |
+| [제주도 해양산업과](https://www.jeju.go.kr/group/part11/change.htm) | 공공 배포 자료 | 크루즈 선석배정 xlsx |
 
 **탐나오 주소는 쓰지 않았습니다.** 상세페이지의 텍스트 주소 247건이 판매자 템플릿
 (`제주시 용담로 121`)이라 실제 위치가 아니었습니다. 대신 페이지에 박혀 있는 카카오맵 좌표

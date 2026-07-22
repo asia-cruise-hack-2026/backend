@@ -5,6 +5,7 @@
 // import는 의존성으로 인식해 반드시 포함시키기 때문입니다.
 import spotsData from '../data/spots.json' with { type: 'json' };
 import goodsData from '../data/goods.json' with { type: 'json' };
+import cruisesData from '../data/cruises.json' with { type: 'json' };
 
 export function seedInto(db) {
   db.exec(`
@@ -34,11 +35,17 @@ export function seedInto(db) {
   );
   CREATE INDEX idx_goods_cat ON goods(category);
   
+  -- 제주도 해양산업과 선석배정 자료 기반 (실제 기항 스케줄)
   CREATE TABLE cruises (
-    id TEXT PRIMARY KEY, line TEXT, ship TEXT, port_key TEXT,
-    arrival TEXT, departure TEXT, arr_m INTEGER, dep_m INTEGER,
-    next_ko TEXT, next_en TEXT, next_ja TEXT, next_zh TEXT
+    id TEXT PRIMARY KEY, ship TEXT, port_key TEXT, berth TEXT,
+    date TEXT, arrival TEXT, departure TEXT, arr_m INTEGER, dep_m INTEGER,
+    stay_hours REAL, overnight INTEGER, gross_tonnage INTEGER, passengers INTEGER,
+    note TEXT,
+    next_ko TEXT, next_en TEXT, next_ja TEXT, next_zh TEXT,
+    prev_ko TEXT, prev_en TEXT, prev_ja TEXT, prev_zh TEXT
   );
+  CREATE INDEX idx_cruises_date ON cruises(date);
+  CREATE INDEX idx_cruises_port ON cruises(port_key);
   CREATE TABLE ports (
     key TEXT PRIMARY KEY, lat REAL, lng REAL,
     name_ko TEXT, name_en TEXT, name_ja TEXT, name_zh TEXT
@@ -103,14 +110,16 @@ export function seedInto(db) {
   insPort.run('jeju',      33.5230, 126.5370, '제주항',        'Jeju Port',      '済州港',       '济州港');
   insPort.run('gangjeong', 33.2246, 126.4790, '강정항 (서귀포)', 'Gangjeong Port', 'カンジョン港', '江汀港');
   
-  const insCruise = db.prepare(`INSERT INTO cruises VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
-  [
-    ['msc','MSC Cruises','MSC Bellissima','jeju','08:00','18:00',480,1080,'후쿠오카, 일본','Fukuoka, Japan','福岡、日本','福冈, 日本'],
-    ['adora','Adora Cruises','Adora Magic City','jeju','07:00','17:00',420,1020,'상하이, 중국','Shanghai, China','上海、中国','上海, 中国'],
-    ['spectrum','Royal Caribbean','Spectrum of the Seas','gangjeong','09:00','19:00',540,1140,'나가사키, 일본','Nagasaki, Japan','長崎、日本','长崎, 日本'],
-    ['diamond','Princess Cruises','Diamond Princess','jeju','08:00','20:00',480,1200,'부산, 대한민국','Busan, Korea','釜山、韓国','釜山, 韩国'],
-    ['costa','Costa Cruises','Costa Serena','gangjeong','10:00','22:00',600,1320,'가고시마, 일본','Kagoshima, Japan','鹿児島、日本','鹿儿岛, 日本'],
-  ].forEach(r => insCruise.run(...r));
+  const insCruise = db.prepare(`INSERT INTO cruises VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  db.exec('BEGIN');
+  for (const c of cruisesData) {
+    insCruise.run(c.id, c.ship, c.portKey, c.berth,
+      c.date, c.arrival, c.departure, c.arrM, c.depM,
+      c.stayHours, c.overnight ? 1 : 0, c.grossTonnage, c.passengers, c.note,
+      c.nextPort.ko, c.nextPort.en, c.nextPort.ja, c.nextPort.zh,
+      c.prevPort.ko, c.prevPort.en, c.prevPort.ja, c.prevPort.zh);
+  }
+  db.exec('COMMIT');
   
   const insPartner = db.prepare(`INSERT INTO partners VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   [

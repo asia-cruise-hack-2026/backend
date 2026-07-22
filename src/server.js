@@ -124,13 +124,21 @@ const goodsRow = (g, lang) => ({
 const cruiseRow = (c, lang) => {
   const port = db.prepare('SELECT * FROM ports WHERE key=?').get(c.port_key);
   return {
-    id: c.id, line: c.line, ship: c.ship,
+    id: c.id, ship: c.ship,
     port: { key: port.key, name: port['name_' + lang], lat: port.lat, lng: port.lng },
+    berth: c.berth,
+    date: c.date,
     arrival: c.arrival, departure: c.departure,
     stayMinutes: c.dep_m - c.arr_m,
+    stayHours: c.stay_hours,
+    overnight: !!c.overnight,
     availableMinutes: Math.max(0, c.dep_m - c.arr_m - BUFFER_MIN),
     boardByTime: fmtTime(c.dep_m - 30),
+    passengers: c.passengers,
+    grossTonnage: c.gross_tonnage,
     nextDestination: c['next_' + lang],
+    prevPort: c['prev_' + lang],
+    note: c.note || undefined,
   };
 };
 
@@ -147,9 +155,39 @@ on('GET', '/api/v1/ports', (ctx) => {
   const lang = langOf(ctx.q);
   return { items: db.prepare('SELECT * FROM ports').all().map(p => ({ key: p.key, name: p['name_' + lang], lat: p.lat, lng: p.lng })) };
 });
+// 실제 선석배정 기반 — 연간 300여 건이므로 날짜/항구/선박으로 좁혀서 조회합니다.
+//   ?date=2026-07-14       그 날 입항하는 배
+//   ?from=2026-07-14       그 날짜 이후 (기본: 가장 이른 날짜부터)
+//   ?port=jeju|gangjeong   항구
+//   ?ship=MSC              선명 부분일치
 on('GET', '/api/v1/cruises', (ctx) => {
-  const lang = langOf(ctx.q);
-  return { items: db.prepare('SELECT * FROM cruises').all().map(c => cruiseRow(c, lang)) };
+  const q = ctx.q, lang = langOf(q);
+  const where = [], args = [];
+  if (q.get('date')) { where.push('date = ?'); args.push(q.get('date')); }
+  else if (q.get('from')) { where.push('date >= ?'); args.push(q.get('from')); }
+  if (q.get('port')) { where.push('port_key = ?'); args.push(q.get('port')); }
+  if (q.get('ship')) { where.push('ship LIKE ?'); args.push('%' + q.get('ship') + '%'); }
+  const sql = 'FROM cruises' + (where.length ? ' WHERE ' + where.join(' AND ') : '');
+  const total = db.prepare(`SELECT COUNT(*) c ${sql}`).get(...args).c;
+  const { page, size, offset } = paging(q);
+  const rows = db.prepare(`SELECT * ${sql} ORDER BY date, arrival LIMIT ? OFFSET ?`).all(...args, size, offset);
+  return { items: rows.map(c => cruiseRow(c, lang)), page, size, totalCount: total };
+});
+
+// 기항이 있는 날짜 목록 — 날짜 선택 UI용
+on('GET', '/api/v1/cruises/dates', (ctx) => {
+  const q = ctx.q;
+  const where = [], args = [];
+  if (q.get('from')) { where.push('date >= ?'); args.push(q.get('from')); }
+  if (q.get('port')) { where.push('port_key = ?'); args.push(q.get('port')); }
+  const sql = 'FROM cruises' + (where.length ? ' WHERE ' + where.join(' AND ') : '');
+  const rows = db.prepare(
+    `SELECT date, COUNT(*) count,
+            SUM(CASE WHEN port_key='jeju' THEN 1 ELSE 0 END) jeju,
+            SUM(CASE WHEN port_key='gangjeong' THEN 1 ELSE 0 END) gangjeong
+     ${sql} GROUP BY date ORDER BY date LIMIT ?`
+  ).all(...args, Math.min(400, num(q.get('limit'), 60)));
+  return { items: rows };
 });
 on('GET', '/api/v1/cruises/:id', (ctx) => {
   const c = db.prepare('SELECT * FROM cruises WHERE id=?').get(ctx.params.id) || notFound('크루즈를 찾을 수 없습니다.');
