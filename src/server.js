@@ -254,7 +254,8 @@ on('GET', '/api/v1/spots', async (ctx) => {
 on('GET', '/api/v1/spots/categories', async (ctx) => {
   const lang = langOf(ctx.q);
   const rows = (await dbAll(`SELECT category key, category_label label, COUNT(*)::int count FROM spots
-     WHERE lang=? AND lat IS NOT NULL GROUP BY category ORDER BY count DESC`, lang));
+     WHERE lang=? AND lat IS NOT NULL
+     GROUP BY category, category_label ORDER BY count DESC`, lang));
   return { items: rows };
 });
 

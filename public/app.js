@@ -490,7 +490,8 @@ function togglePkg(id){
       if(S.pkg.size) bar.querySelector('#pkgBtn').textContent = S.pkg.size + t('build_pkg');
       else bar.remove();
     }
-    drawMarkers(false);          // 마커 색만 갱신, 지도 위치는 유지
+    drawMarkers(false);          // 마커만 갱신 (전체 render를 하면 지도가 새로 만들어짐)
+    fitToPicked();               // 담은 곳들이 한눈에 들어오도록 화면을 맞춤
     return;
   }
   render();
@@ -573,6 +574,25 @@ function clusterSpots(spots, zoom){
     groups.get(key).push(s);
   }
   return [...groups.values()];
+}
+
+// 담은 스팟들이 한 화면에 들어오도록 지도를 맞춘다.
+// 2곳 이상일 때만 — 1곳이면 최대 확대돼 버려서 오히려 방향 감각을 잃는다.
+function fitToPicked(){
+  if(!S.mapReady || !S.map) return;
+  const pts = [...S.pkg].map(id => S.pkgSpots.get(id)).filter(s => s && s.lat != null);
+  if(!pts.length) return;
+  if(pts.length === 1){ S.map.panTo({lat:pts[0].lat, lng:pts[0].lng}); return; }
+
+  const b = new google.maps.LatLngBounds();
+  pts.forEach(s => b.extend({lat:s.lat, lng:s.lng}));
+  b.extend({lat:S.cruise.port.lat, lng:S.cruise.port.lng});   // 출발·복귀 지점
+  S.map.fitBounds(b, {top:56, right:56, bottom:56, left:56});
+
+  // 스팟이 서로 붙어 있으면 과하게 확대되므로 상한을 둔다
+  google.maps.event.addListenerOnce(S.map, 'idle', () => {
+    if(S.map.getZoom() > 15) S.map.setZoom(15);
+  });
 }
 
 function drawMarkers(refit){
