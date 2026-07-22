@@ -10,7 +10,6 @@
 
 # 의존성 / 빌드
 node_modules/
-dist/
 
 # 수집 원본 (스크립트로 재생성)
 scripts/**/goods_raw/
@@ -26,3 +25,6 @@ Thumbs.db
 
 # 수집 스크립트 중간 산출물
 scripts/.work/
+
+.vercel
+.env*

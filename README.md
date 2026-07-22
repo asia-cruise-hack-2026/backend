@@ -7,6 +7,27 @@ Asia Cruise Liners Hackathon 2026 · [frontend 저장소](https://github.com/asi
 
 ---
 
+## 배포
+
+**운영 URL — https://tamrapass.vercel.app**
+
+Vercel 서버리스로 배포돼 있습니다. 로컬과 배포 환경의 차이는 DB뿐입니다:
+
+| | 로컬 | Vercel |
+|---|---|---|
+| DB | 파일 (`tamrapass.db`) | 인메모리 (콜드스타트 시 JSON에서 적재, ~60ms) |
+| 정적 파일 | 서버가 직접 서빙 | 동일 (단일 함수가 API+정적 모두 처리) |
+| 맵 키 | `.env` | Vercel 환경변수 |
+
+서버리스라 **인스턴스가 재시작되면 주문·이벤트 기록이 초기화**됩니다.
+읽기(관광지·상품)는 영향 없고, 누적 통계(`/stats/summary`)만 인스턴스 기준으로 집계됩니다.
+영구 보존이 필요해지면 외부 DB(Vercel Postgres 등)로 바꾸면 됩니다.
+
+재배포:
+```bash
+vercel deploy --prod
+```
+
 ## 빠른 시작
 
 ```bash

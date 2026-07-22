@@ -9,8 +9,20 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
-const db = new DatabaseSync(path.join(ROOT, 'tamrapass.db'));
 const PORT = process.env.PORT || 8787;
+
+// ---------- DB ----------
+// 로컬: npm run seed 로 만든 파일 DB를 사용
+// 서버리스(Vercel): 파일 시스템이 읽기 전용이라 인메모리 DB를 콜드스타트에 채움
+const DB_FILE = path.join(ROOT, 'tamrapass.db');
+const useFileDb = !process.env.VERCEL && fs.existsSync(DB_FILE);
+const db = new DatabaseSync(useFileDb ? DB_FILE : ':memory:');
+if (!useFileDb) {
+  const t0 = Date.now();
+  const { seedInto } = await import('./seed-core.js');
+  const n = seedInto(db);
+  console.log(`[db] in-memory seed: spots ${n.spots} · goods ${n.goods} (${Date.now() - t0}ms)`);
+}
 
 // ---------- .env 로더 (의존성 없이) ----------
 const ENV = (() => {
@@ -24,7 +36,17 @@ const ENV = (() => {
   }
   return out;
 })();
-const MAPS_KEY = ENV.VITE_GOOGLE_MAPS_API_KEY || ENV.GOOGLE_MAPS_API_KEY || '';
+// 배포 환경에서는 플랫폼 환경변수가 우선, 로컬에서는 .env 파일
+const MAPS_KEY =
+  process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY ||
+  ENV.VITE_GOOGLE_MAPS_API_KEY || ENV.GOOGLE_MAPS_API_KEY || '';
+
+// 정적 파일 폴더 탐색 — 로컬과 서버리스 번들 양쪽 대응
+const PUBLIC_DIR = [
+  path.join(ROOT, 'public'),
+  path.join(process.cwd(), 'public'),
+  '/var/task/public',
+].find(p => fs.existsSync(path.join(p, 'index.html'))) || path.join(ROOT, 'public');
 
 // ---------- 공통 ----------
 const LANGS = ['ko', 'en', 'ja', 'zh'];
@@ -464,9 +486,10 @@ on('GET', '/api/v1/health', () => ({
   goods: db.prepare('SELECT COUNT(*) c FROM goods').get().c,
 }));
 
-// ---------- 서버 ----------
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+// ---------- 요청 핸들러 ----------
+// Vercel 함수(api/index.js)와 로컬 http 서버가 함께 사용합니다.
+export async function handler(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const send = (status, body) => {
     res.writeHead(status, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -481,8 +504,8 @@ const server = http.createServer(async (req, res) => {
   // ---------- 정적 파일 (프론트) ----------
   if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
     const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    const file = path.join(ROOT, 'public', rel);
-    if (!file.startsWith(path.join(ROOT, 'public'))) { res.writeHead(403); return res.end(); }
+    const file = path.join(PUBLIC_DIR, rel);
+    if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end(); }
     if (fs.existsSync(file) && fs.statSync(file).isFile()) {
       const ext = path.extname(file);
       const type = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -513,9 +536,15 @@ const server = http.createServer(async (req, res) => {
     console.error(e);
     send(500, { error: { code: 'INTERNAL', message: '서버 오류가 발생했습니다.' } });
   }
-});
+}
 
-server.listen(PORT, () => {
-  console.log(`TAMRA PASS API  →  http://localhost:${PORT}/api/v1`);
-  console.log(`  health: http://localhost:${PORT}/api/v1/health`);
-});
+export default handler;
+
+// ---------- 로컬 실행 ----------
+// 서버리스(Vercel)에서는 상시 서버를 띄우지 않으므로 listen 하지 않습니다.
+if (!process.env.VERCEL) {
+  http.createServer(handler).listen(PORT, () => {
+    console.log(`TAMRA PASS  →  http://localhost:${PORT}`);
+    console.log(`  API   : http://localhost:${PORT}/api/v1/health`);
+  });
+}
