@@ -1,0 +1,51 @@
+# TAMRA PASS — 단일 GCE VM 배포 (API + PostgreSQL 한 인스턴스)
+# 웹(정적)은 host nginx 가, API/DB 는 이 컴포즈가 담당한다.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml run --rm api npm run seed   # 최초 1회(스키마 DROP·재생성)
+#
+# 같은 폴더의 .env 를 컴포즈가 자동으로 읽는다 (DB_PASSWORD 등).
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tamrapass}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 를 .env 에 설정하세요}
+    volumes:
+      - tamrapass_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-tamrapass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-tamrapass}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 를 .env 에 설정하세요}
+      VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"   # 루프백 전용 — 외부 노출은 host nginx 만 통한다
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+volumes:
+  tamrapass_pgdata:
