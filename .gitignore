@@ -1,0 +1,28 @@
+# 환경변수 — API 키가 들어있으므로 절대 커밋 금지
+.env
+.env.*
+!.env.example
+
+# 생성물 (seed로 언제든 재생성)
+*.db
+*.db-journal
+*.sqlite
+
+# 의존성 / 빌드
+node_modules/
+dist/
+
+# 수집 원본 (스크립트로 재생성)
+scripts/**/goods_raw/
+scripts/**/*.tsv
+scripts/**/*_raw/
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# 수집 스크립트 중간 산출물
+scripts/.work/
