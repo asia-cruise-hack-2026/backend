@@ -132,7 +132,7 @@ const S = {
   view:'lang', route:'home', lang:'ko',
   cruises:[], cruise:null,
   spots:[], total:0, page:1, size:20, categories:[], category:'all',
-  pkg:new Set(), activeSpot:null, currentSpot:null, package:null, partners:[], matchedId:null,
+  pkg:new Set(), pkgSpots:new Map(), activeSpot:null, currentSpot:null, package:null, partners:[], matchedId:null,
   goods:[], goodsTotal:0, goodsPage:1, shopCat:'all', goodsCats:[], currentGoods:null,
   cart:[], deliveryIdx:0, importAgree:false, order:null,
   taxiDest:'', taxiState:'idle', taxiInfo:null,
@@ -458,8 +458,18 @@ function bindExplore(){
   initMap();
 }
 function togglePkg(id){
-  if(S.pkg.has(id)){ S.pkg.delete(id); toast(t('removed')); }
-  else { S.pkg.add(id); toast(t('added')); track('spot_add_package', id); }
+  if(S.pkg.has(id)){
+    S.pkg.delete(id); S.pkgSpots.delete(id);
+    toast(t('removed'));
+  } else {
+    // 지도 핀을 그리려면 좌표가 필요한데, 카테고리 필터를 바꾸면 목록에서 사라질 수 있다.
+    // 담는 시점에 좌표를 따로 보관해 두면 필터와 무관하게 핀이 유지된다.
+    const s = (S.mapSpots || []).find(x => x.id === id)
+           || S.spots.find(x => x.id === id)
+           || (S.currentSpot && S.currentSpot.id === id ? S.currentSpot : null);
+    if(s) S.pkgSpots.set(id, { id, name: s.name, lat: s.lat, lng: s.lng });
+    S.pkg.add(id); toast(t('added')); track('spot_add_package', id);
+  }
 
   // 탐방 화면에서는 전체 렌더를 피한다.
   // render()를 부르면 지도가 새로 만들어져 사용자가 보던 위치·확대가 초기화되기 때문.
@@ -576,7 +586,9 @@ function drawMarkers(refit){
   const vb = S.map.getBounds();
   const visible = vb ? source.filter(s=>vb.contains({lat:s.lat,lng:s.lng})) : source;
   // 화면에 아무것도 없으면(첫 로드 등) 전체로 폴백
-  const target = visible.length ? visible : source;
+  const target0 = visible.length ? visible : source;
+  // 패키지에 담은 스팟은 클러스터에 묻히면 안 되므로 따로 빼둔다
+  const target = target0.filter(s => !S.pkg.has(s.id));
 
   for(const group of clusterSpots(target, zoom)){
     if(group.length === 1){
@@ -607,6 +619,35 @@ function drawMarkers(refit){
         new S.AdvancedMarker({map:S.map,position:{lat,lng},content:el,zIndex:2}));
     }
   }
+
+  // ---- 패키지에 담은 스팟 — 항상 개별 핀으로, 고른 순서대로 번호를 붙여 표시 ----
+  // 클러스터링·화면영역 필터를 거치지 않으므로 어디에 있든 반드시 보인다.
+  const picked = [...S.pkg].map(id => ({ id, s: S.pkgSpots.get(id) }))
+                           .filter(x => x.s && x.s.lat != null);
+  // 가까이 몰린 핀은 이름표가 서로 가리므로, 겹치는 것끼리는 번호만 남긴다
+  const pxPerDeg = 256 * Math.pow(2, zoom) / 360;
+  const collided = new Set();
+  picked.forEach((a, i) => picked.forEach((b, j) => {
+    if(j <= i) return;
+    const dx = Math.abs(a.s.lng - b.s.lng) * pxPerDeg;
+    const dy = Math.abs(a.s.lat - b.s.lat) * pxPerDeg * 1.25;
+    if(dx < 130 && dy < 26) { collided.add(a.id); collided.add(b.id); }
+  }));
+
+  picked.forEach(({ id, s }, i) => {
+    const compact = collided.has(id);            // 겹치면 이름 생략
+    const el = document.createElement('div');
+    el.className = 'pin picked' + (compact ? ' compact' : '') + (S.activeSpot === id ? ' active' : '');
+    el.innerHTML =
+      `<span class="bub"><span class="no">${i+1}</span>${
+        compact ? '' : esc(s.name.length>12 ? s.name.slice(0,11)+'…' : s.name)
+      }</span><span class="tail"></span>`;
+    el.title = s.name;
+    el.onclick = ev => { ev.stopPropagation(); openSpot(id); };
+    S.markers.set('pk:'+id, new S.AdvancedMarker({
+      map:S.map, position:{lat:s.lat, lng:s.lng}, content:el, zIndex: 50 + i,
+    }));
+  });
 
   // 항구 마커
   if(S.portMarker) S.portMarker.map=null;
