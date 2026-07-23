@@ -9,6 +9,25 @@ Internet ─▶ nginx :80/:443 (TLS, host)
                                        └─ db 컨테이너 :5432 (compose 내부 네트워크)
 ```
 
+## 0) 배포 맥락 — 다른 세션/사람이 먼저 읽을 것
+
+- **무엇을 올리나**: 프론트(정적 SPA)·백엔드 API·PostgreSQL 을 **한 GCE VM** 에. host nginx = `/`(정적 프론트) + `/api/`(백엔드 컨테이너, 루프백 프록시).
+- **⚠️ 이 배포 구성은 아직 `deploy/vm` 브랜치에만 있다 (양 레포, 미merge·미push)**:
+  - **frontend `deploy/vm`** — `vite.config.ts` 정적 SPA(`spa` 모드) 설정. **이게 있어야 `pnpm build` 가 `dist/client/index.html` 을 낸다**(main 에는 아직 없음 — main 빌드는 SSR fetch 핸들러라 정적 셸이 안 나온다).
+  - **backend `deploy/vm`** — 이 런북 · `deploy/nginx/tamrapass.conf` · `docker-compose.prod.yml`.
+  - 배포하려면 **두 레포의 `deploy/vm` 을 main 에 merge**(또는 그 브랜치를 체크아웃)한 뒤 진행한다.
+- **프론트는 현재 100% mock**(`entities/*/api/mock.ts`, 실 네트워크 호출 0). `/api/` 프록시는 백엔드용으로 준비만 돼 있고 **프론트는 아직 호출하지 않는다** → 데모는 프론트 단독으로 완결. 실 API 연동(mock→`/api`)은 별도 작업.
+- **⚠️ 백엔드는 이미 Cloud Run + Cloud SQL 로 live**. 이 단일 VM 구성은 **추가**이며, 승인 전까지 live Cloud Run 은 건드리지 않는다.
+- **CI/CD 없음(의도)**: MVP 해커톤이라 아래 수동 절차로 충분. 재배포도 수동(맨 아래 §재배포).
+
+### 사람이 미리 준비할 입력값
+| 값 | 용도 | 비고 |
+|---|---|---|
+| GCE VM (Ubuntu LTS, e2-small+) | 실행 호스트 | 방화벽 **22/80/443 만** |
+| `VITE_GOOGLE_MAPS_API_KEY` | **프론트 빌드 시** 클라이언트 번들에 baked-in | Google 콘솔: Maps JavaScript + Directions API 활성화, **HTTP 리퍼러 제한에 `<VM_IP>.sslip.io` 추가**(안 하면 지도 안 뜸) |
+| `DB_PASSWORD` | postgres 컨테이너 | VM `/opt/tamrapass/.env`(mode 600) |
+| VM 공인 IP | sslip.io TLS 호스트명 | `<VM_IP>.sslip.io` (도메인 대체) |
+
 ## 1) VM 준비 (1회)
 - GCE 인스턴스: Ubuntu LTS, e2-small 이상. **방화벽은 22/80/443 만** 개방.
 - 설치:
@@ -38,14 +57,17 @@ sudo rsync -a --delete <frontend>/dist/client/ /var/www/tamrapass/
 ```
 > ⚠️ 맵 키는 빌드 시 클라이언트 번들에 baked-in 된다 — 빌드 환경에 `VITE_GOOGLE_MAPS_API_KEY` 를 넣고 빌드할 것. 프론트는 **서버 런타임/컨테이너가 없다**(nginx 정적 서빙만).
 
-## 4) nginx + TLS
+## 4) nginx + TLS (도메인 없음 → sslip.io 무료 TLS)
 ```bash
 sudo cp deploy/nginx/tamrapass.conf /etc/nginx/sites-available/tamrapass
 sudo ln -sf /etc/nginx/sites-available/tamrapass /etc/nginx/sites-enabled/tamrapass
+# server_name 을 VM 공인 IP 기반 sslip.io 호스트명으로 교체 (예: IP 34.64.1.2 → 34.64.1.2.sslip.io):
+sudo sed -i 's/server_name _;/server_name <VM_IP>.sslip.io;/' /etc/nginx/sites-available/tamrapass
 sudo nginx -t && sudo systemctl reload nginx
-# 도메인이 있으면 (server_name 을 도메인으로 바꾼 뒤):
-sudo certbot --nginx -d <도메인>
+# 무료 TLS 발급 — sslip.io 호스트명을 도메인처럼 사용:
+sudo certbot --nginx -d <VM_IP>.sslip.io
 ```
+> `sslip.io` 는 `<IP>.sslip.io` 를 그 IP 로 해석해 주는 무료 와일드카드 DNS — 도메인 없이 Let's Encrypt TLS 를 받기 위한 것. **같은 호스트명을 맵 키 리퍼러 제한에도 등록**해야 지도가 뜬다. 접속 URL = `https://<VM_IP>.sslip.io`.
 
 ## 재배포
 ```bash
