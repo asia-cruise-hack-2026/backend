@@ -30,12 +30,13 @@ curl -s http://127.0.0.1:8080/api/v1/health    # {"ok":true,"spots":...,"goods":
 ```
 
 ## 3) 프론트 빌드 배치
-프론트 레포에서 정적 빌드 후 산출물을 `/var/www/tamrapass` 로 복사:
+프론트는 **정적 SPA**(TanStack Start `spa` 모드 — 프론트 레포 `vite.config.ts`)로 빌드된다. 산출물 `dist/client/`(SPA 셸 `index.html` + 자산)를 `/var/www/tamrapass` 로 복사:
 ```bash
-# (frontend 레포) pnpm build → dist/
+# (frontend 레포) VITE_GOOGLE_MAPS_API_KEY=<맵키> pnpm build   → dist/client/ (index.html 포함)
 sudo mkdir -p /var/www/tamrapass
-sudo rsync -a --delete <frontend>/dist/ /var/www/tamrapass/
+sudo rsync -a --delete <frontend>/dist/client/ /var/www/tamrapass/
 ```
+> ⚠️ 맵 키는 빌드 시 클라이언트 번들에 baked-in 된다 — 빌드 환경에 `VITE_GOOGLE_MAPS_API_KEY` 를 넣고 빌드할 것. 프론트는 **서버 런타임/컨테이너가 없다**(nginx 정적 서빙만).
 
 ## 4) nginx + TLS
 ```bash
