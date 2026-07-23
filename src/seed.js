@@ -40,11 +40,15 @@ try {
   await bulkInsert(client, 'spots',
     ['id','lang','source','name','description','category','category_label','lat','lng','address','phone',
      'thumbnail','image','tags','dist_jeju_km','dist_gangjeong_km','nearest_port','bookable','price',
-     'stay_minutes','lang_fallback','detail_url'],
+     'stay_minutes','lang_fallback','detail_url',
+     'duration_min','duration_typical','duration_max','duration_source',
+     'google_rating','google_review_count','tamnao_review_count','pop_score'],
     spotsData.map(s => [s.id, s.lang, s.source, s.name, s.description, s.category, s.category_label,
       s.lat, s.lng, s.address, s.phone, s.thumbnail, s.image, s.tags,
       s.dist_jeju_km, s.dist_gangjeong_km, s.nearest_port, s.bookable, s.price,
-      s.stay_minutes, s.lang_fallback, s.detail_url]));
+      s.stay_minutes, s.lang_fallback, s.detail_url,
+      s.duration_min ?? null, s.duration_typical ?? null, s.duration_max ?? null, s.duration_source ?? null,
+      s.google_rating ?? null, s.google_review_count ?? null, s.tamnao_review_count ?? null, s.pop_score ?? null]));
 
   console.log(`goods 적재… (${goodsData.length}행)`);
   await bulkInsert(client, 'goods',

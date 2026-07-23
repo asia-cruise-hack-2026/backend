@@ -80,10 +80,16 @@ const paging = q => {
 };
 
 // ---------- 직렬화 ----------
+// 소요시간: 표시는 typical(현실적), 제약검증은 max(보수적). 없으면 stay_minutes 폴백.
+const stayTypicalOf = r => r.duration_typical ?? r.stay_minutes;
+const stayMaxOf = r => r.duration_max ?? r.stay_minutes;
+
 const spotRow = (r, portKey, availableMin) => {
   const km = portKey === 'gangjeong' ? r.dist_gangjeong_km : r.dist_jeju_km;
   const drive = km == null ? null : driveMin(km);
-  const round = drive == null ? null : drive * 2 + r.stay_minutes;
+  const stayTypical = stayTypicalOf(r), stayMax = stayMaxOf(r);
+  const round = drive == null ? null : drive * 2 + stayTypical;
+  const roundMax = drive == null ? null : drive * 2 + stayMax;
   return {
     id: r.id, source: r.source,
     name: r.name,
@@ -93,14 +99,43 @@ const spotRow = (r, portKey, availableMin) => {
     address: r.address || '',
     thumbnail: r.thumbnail || '',
     distanceKm: km, driveMinutes: drive,
-    stayMinutes: r.stay_minutes,
+    stayMinutes: stayTypical,
+    stayMaxMinutes: stayMax,
     roundTripMinutes: round,
-    fitsWindow: availableMin != null && round != null ? round <= availableMin : undefined,
+    // 배 놓침 방지 — 보수적(max) 기준으로 판정
+    fitsWindow: availableMin != null && roundMax != null ? roundMax <= availableMin : undefined,
+    popularity: r.pop_score != null ? {
+      score: r.pop_score,
+      googleRating: r.google_rating ?? undefined,
+      googleReviews: r.google_review_count ?? undefined,
+    } : undefined,
     bookable: !!r.bookable,
     langFallback: r.lang_fallback ? true : undefined,
     detailUrl: r.detail_url,
   };
 };
+
+// --- 추천 랭킹: 카테고리 내 인기도 정규화 + 소량 탐색 (Q1·Q2) ---
+// 후보를 카테고리별 코호트로 나눠 pop_score 백분위(0..1)를 매기고,
+// 최종점수 = 0.9·카테고리백분위 + 0.1·탐색(랜덤). 인기 없는 상품은 하위(0.25) 고정.
+function rankRecommended(rows) {
+  const byCat = new Map();
+  for (const r of rows) {
+    const c = r.category || 'etc';
+    (byCat.get(c) || byCat.set(c, []).get(c)).push(r);
+  }
+  const pct = new Map();
+  for (const [, arr] of byCat) {
+    const withPop = arr.filter(r => r.pop_score != null).sort((a, b) => a.pop_score - b.pop_score);
+    const n = withPop.length;
+    withPop.forEach((r, i) => pct.set(r, n <= 1 ? 0.7 : i / (n - 1)));
+    for (const r of arr) if (r.pop_score == null) pct.set(r, 0.25); // 미지 인기 → 하위 고정
+  }
+  return rows
+    .map(r => ({ r, score: 0.9 * (pct.get(r) ?? 0.5) + 0.1 * Math.random() }))
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.r);
+}
 const goodsRow = (g, lang) => ({
   id: g.id, name: g.name, description: g.description || '',
   category: g.category, categoryLabel: g.category_label,
@@ -219,35 +254,42 @@ on('GET', '/api/v1/spots', async (ctx) => {
     if ([s, w, n, e].some(isNaN)) bad('INVALID_PARAM', 'bbox 형식은 south,west,north,east 입니다.');
     where.push('lat BETWEEN ? AND ?', 'lng BETWEEN ? AND ?'); args.push(s, n, w, e);
   }
-  // 체류시간 필터: 왕복이동 + 체류 <= 가용시간   (driveMinutes = max(6, km*2.4))
+  // 체류시간 필터: 왕복이동 + 체류(보수적 max) <= 가용시간   (driveMinutes = max(6, km*2.4))
   if (availableMin != null) {
-    where.push(`(GREATEST(6, ROUND(${distCol} * 2.4)) * 2 + stay_minutes) <= ?`);
+    where.push(`(GREATEST(6, ROUND(${distCol} * 2.4)) * 2 + COALESCE(duration_max, stay_minutes)) <= ?`);
     args.push(availableMin);
   }
   const sql = `FROM spots WHERE ${where.join(' AND ')}`;
   const total = (await dbOne(`SELECT COUNT(*)::int c ${sql}`, ...args)).c;
-
-  const sort = { distance: `${distCol} ASC`, name: 'name ASC' }[q.get('sort')] || `${distCol} ASC`;
   const { page, size, offset } = paging(q);
-  const rows = (await dbAll(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`, ...args, size, offset));
+  const compact = q.get('compact') === '1';
+  const compactRow = r => ({
+    id: r.id, name: r.name, lat: r.lat, lng: r.lng,
+    category: r.category, bookable: r.bookable ? 1 : 0,
+    km: portKey === 'gangjeong' ? r.dist_gangjeong_km : r.dist_jeju_km,
+    pop: r.pop_score ?? undefined,
+  });
 
-  // compact=1 — 지도 마커용 축약 응답 (전 지역을 한 번에 받기 위해 페이로드를 줄임)
-  if (q.get('compact') === '1') {
+  // sort=recommended: 카테고리 내 인기도 정규화 + 탐색. 랭킹이 후보 전체를 봐야 하므로
+  // 거리순 상한(400)으로 후보를 받아 앱에서 재정렬 후 페이지 슬라이스.
+  if (q.get('sort') === 'recommended') {
+    const cand = await dbAll(`SELECT * ${sql} ORDER BY ${distCol} ASC LIMIT 400`, ...args);
+    const ranked = rankRecommended(cand);
+    const pageRows = ranked.slice(offset, offset + size);
     return {
-      items: rows.map(r => ({
-        id: r.id, name: r.name, lat: r.lat, lng: r.lng,
-        category: r.category, bookable: r.bookable ? 1 : 0,
-        km: portKey === 'gangjeong' ? r.dist_gangjeong_km : r.dist_jeju_km,
-      })),
-      page, size, totalCount: total,
-      window: { port: portKey, availableMinutes: availableMin },
+      items: pageRows.map(r => compact ? compactRow(r) : spotRow(r, portKey, availableMin)),
+      page, size, totalCount: Math.min(total, ranked.length),
+      window: { port: portKey, availableMinutes: availableMin, bufferMinutes: compact ? undefined : BUFFER_MIN },
     };
   }
 
+  const sort = { distance: `${distCol} ASC`, name: 'name ASC', popularity: 'pop_score DESC NULLS LAST' }[q.get('sort')] || `${distCol} ASC`;
+  const rows = (await dbAll(`SELECT * ${sql} ORDER BY ${sort} LIMIT ? OFFSET ?`, ...args, size, offset));
+
   return {
-    items: rows.map(r => spotRow(r, portKey, availableMin)),
+    items: rows.map(r => compact ? compactRow(r) : spotRow(r, portKey, availableMin)),
     page, size, totalCount: total,
-    window: { port: portKey, availableMinutes: availableMin, bufferMinutes: BUFFER_MIN },
+    window: { port: portKey, availableMinutes: availableMin, bufferMinutes: compact ? undefined : BUFFER_MIN },
   };
 });
 
@@ -319,7 +361,7 @@ on('POST', '/api/v1/packages', async (ctx) => {
   const P = { lat: port.lat, lng: port.lng };
   const cost = order => {
     let t = 0, cur = P;
-    for (const s of order) { t += legMin(cur, s) + s.stay_minutes; cur = s; }
+    for (const s of order) { t += legMin(cur, s) + stayTypicalOf(s); cur = s; }
     return t + legMin(cur, P);
   };
   let best = spots;
@@ -342,13 +384,14 @@ on('POST', '/api/v1/packages', async (ctx) => {
     const move = legMin(cur, s);
     clock += move; total += move;
     const arriveAt = fmtTime(clock);
-    clock += s.stay_minutes; total += s.stay_minutes;
+    const stay = stayTypicalOf(s);
+    clock += stay; total += stay;
     cur = s;
     return {
       no: i + 1, spotId: s.id, name: s.name,
       category: s.category_label, thumbnail: s.thumbnail || '',
       lat: s.lat, lng: s.lng,
-      arriveAt, departAt: fmtTime(clock), stayMinutes: s.stay_minutes,
+      arriveAt, departAt: fmtTime(clock), stayMinutes: stay,
       moveFromPrevMinutes: move,
     };
   });
@@ -367,8 +410,8 @@ on('POST', '/api/v1/packages', async (ctx) => {
     pkg.suggestion = {
       message: `체류 가능 시간을 ${over}분 초과했어요. 아래 스팟을 빼면 일정이 맞습니다.`,
       removeSpotIds: [...best].sort((a, b) =>
-        (driveMin(hav(P.lat, P.lng, b.lat, b.lng)) + b.stay_minutes) -
-        (driveMin(hav(P.lat, P.lng, a.lat, a.lng)) + a.stay_minutes)).slice(0, 1).map(s => s.id),
+        (driveMin(hav(P.lat, P.lng, b.lat, b.lng)) + stayTypicalOf(b)) -
+        (driveMin(hav(P.lat, P.lng, a.lat, a.lng)) + stayTypicalOf(a))).slice(0, 1).map(s => s.id),
     };
   }
   (await dbExec(`INSERT INTO packages VALUES (?,?,?,?,?,?,?)`, pkg.id, ctx.sessionId, c.id, JSON.stringify(spotIds), JSON.stringify(pkg), total, nowISO()));

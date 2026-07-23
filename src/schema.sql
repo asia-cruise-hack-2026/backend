@@ -16,11 +16,19 @@ CREATE TABLE spots (
   stay_minutes INTEGER DEFAULT 60,
   lang_fallback INTEGER DEFAULT 0,
   detail_url TEXT,
+  -- 소요시간 추정 (탐나오 상세페이지 판독 + 유형 유추; null이면 stay_minutes 폴백)
+  duration_min INTEGER, duration_typical INTEGER, duration_max INTEGER,
+  duration_source TEXT,
+  -- 인기도 (구글/탐나오 리뷰 + 베이지안 pop_score 0..1; 추천 정렬용)
+  google_rating DOUBLE PRECISION, google_review_count INTEGER,
+  tamnao_review_count INTEGER,
+  pop_score DOUBLE PRECISION,
   PRIMARY KEY (id, lang)
 );
 CREATE INDEX idx_spots_lang ON spots(lang);
 CREATE INDEX idx_spots_geo  ON spots(lat, lng);
 CREATE INDEX idx_spots_dist ON spots(dist_jeju_km, dist_gangjeong_km);
+CREATE INDEX idx_spots_pop  ON spots(pop_score);
 
 CREATE TABLE goods (
   id TEXT PRIMARY KEY,
